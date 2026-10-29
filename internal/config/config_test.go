@@ -135,14 +135,24 @@ func TestParseRefusesSecondDocument(t *testing.T) {
 
 // YAML reads an unquoted * as an alias; the error says to quote it.
 func TestParseUnquotedStar(t *testing.T) {
-	_, err := Parse([]byte("deny_hosts:\n  - *.evil.example\n"))
-	if err == nil || !strings.Contains(err.Error(), "must be quoted") {
-		t.Errorf("err = %v, want a hint to quote *", err)
+	for _, doc := range []string{
+		"deny_hosts:\n  - *.evil.example\n",
+		"deny_hosts: [*.evil.example]\n",
+		"deny_hosts: [a.example, *.evil.example]\n",
+		"deny_hosts: *.evil.example\n",
+	} {
+		if _, err := Parse([]byte(doc)); err == nil || !strings.Contains(err.Error(), "must be quoted") {
+			t.Errorf("Parse(%q) = %v, want a hint to quote *", doc, err)
+		}
 	}
 	for _, doc := range []string{
 		"deny_hosts: [a\n",
 		// A real alias, and an error that isn't a syntax error.
 		"deny_hosts:\n  - &h a.example\nallow_hosts:\n  - *h\nfoo: 1\n",
+		// A * in a comment, and an unrelated syntax error.
+		"# e.g.: *.example.com\ndeny_hosts: [a\n",
+		// An anchor name that isn't valid, rather than an alias.
+		"deny_hosts: [&.x]\n",
 	} {
 		if _, err := Parse([]byte(doc)); err == nil || strings.Contains(err.Error(), "must be quoted") {
 			t.Errorf("Parse(%q) = %v, want an error without the hint", doc, err)

@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/netip"
 	"regexp"
+	"strings"
 
 	"github.com/evadcmd/kuzl/internal/netguard"
 	"go.yaml.in/yaml/v3"
@@ -90,9 +91,15 @@ func entryErr(n *yaml.Node, err error) error {
 	return &EntryError{Line: n.Line, Err: err}
 }
 
-// unquotedStar finds a list item starting with *, which YAML reads as an
-// alias, so that the syntax error it causes can say so.
-var unquotedStar = regexp.MustCompile(`(?m)^\s*-\s*\*`)
+// unquotedStar finds a value starting with *, in a block list, a flow list
+// or after a key, which YAML reads as an alias, so that the syntax error it
+// causes can say so.
+var unquotedStar = regexp.MustCompile(`(?m)(^\s*-|[\[,:])\s*\*`)
+
+// badAlias is yaml's syntax error for an alias or anchor name that isn't
+// valid, such as the .example.com of *.example.com. Only that error gets the
+// hint, so a * in a comment doesn't add it to an unrelated one.
+const badAlias = "did not find expected alphabetic or numeric character"
 
 // Parse decodes a policy file. Unknown keys and values of the wrong type are
 // reported together, as a *yaml.TypeError; an invalid entry is an
@@ -100,9 +107,7 @@ var unquotedStar = regexp.MustCompile(`(?m)^\s*-\s*\*`)
 func Parse(data []byte) (netguard.Rules, error) {
 	f, err := decodeFile(data)
 	if err != nil {
-		_, typed := errors.AsType[*yaml.TypeError](err)
-		_, entry := errors.AsType[*EntryError](err)
-		if !typed && !entry && unquotedStar.Match(data) {
+		if strings.Contains(err.Error(), badAlias) && unquotedStar.Match(data) {
 			err = fmt.Errorf(`%w (a value starting with * must be quoted, as in "*.example.com")`, err)
 		}
 		return netguard.Rules{}, err
