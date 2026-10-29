@@ -48,18 +48,26 @@ func prefixes(ss ...string) []netip.Prefix {
 }
 
 // Public reports whether ip is on the public internet, the only addresses
-// kuzl dials. An IPv4-mapped IPv6 address is judged as the IPv4 address it
-// maps, so ::ffff:127.0.0.1 is loopback.
+// kuzl dials. An address carrying an IPv4 address is judged as that, so
+// ::ffff:127.0.0.1 is loopback (see canonical).
 func Public(ip netip.Addr) bool {
-	ip = ip.WithZone("").Unmap()
+	ip = canonical(ip)
 	if ip.Is4() {
 		return !inAny(nonPublic4, ip)
 	}
+	return global6.Contains(ip) && !inAny(nonPublic6, ip)
+}
+
+// canonical returns ip without a zone, and as IPv4 if it is an IPv4-mapped
+// or NAT64 address, which reach the IPv4 address in their last 32 bits. Every
+// check compares this form, so that one address has one spelling.
+func canonical(ip netip.Addr) netip.Addr {
+	ip = ip.WithZone("").Unmap()
 	if nat64.Contains(ip) {
 		b := ip.As16()
-		return Public(netip.AddrFrom4([4]byte(b[12:])))
+		return netip.AddrFrom4([4]byte(b[12:]))
 	}
-	return global6.Contains(ip) && !inAny(nonPublic6, ip)
+	return ip
 }
 
 func inAny(ps []netip.Prefix, ip netip.Addr) bool {

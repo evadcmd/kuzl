@@ -52,14 +52,14 @@ type dialFunc func(ctx context.Context, network, address string) (net.Conn, erro
 // Errors from its Do wrap a *RefusedError for a refused request, a
 // *TooManyRedirectsError, or what net reports, such as a *net.DNSError.
 func (p *Policy) Client(o Options) *http.Client {
-	d := &net.Dialer{Timeout: o.ConnectTimeout, Control: control}
+	d := &net.Dialer{Timeout: o.ConnectTimeout, Control: p.control}
 	return p.client(o, net.DefaultResolver, d.DialContext)
 }
 
 func (p *Policy) client(o Options, r resolver, dial dialFunc) *http.Client {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.Proxy = nil
-	t.DialContext = (&dialer{resolve: r, dial: dial}).DialContext
+	t.DialContext = (&dialer{policy: p, resolve: r, dial: dial}).DialContext
 	t.DialTLSContext = nil
 	return &http.Client{
 		Transport:     &checkedTransport{policy: p, next: t},
@@ -122,10 +122,11 @@ func port(u *url.URL) string {
 	return "80"
 }
 
-// dialer resolves the name itself and dials only the public addresses it
-// gets, by IP, so that the address checked is the one connected to and a
-// second lookup can't return another (DNS rebinding).
+// dialer resolves the name itself and dials only the addresses it gets that
+// the policy allows, by IP, so that the address checked is the one connected
+// to and a second lookup can't return another (DNS rebinding).
 type dialer struct {
+	policy  *Policy
 	resolve resolver
 	dial    dialFunc
 }
@@ -145,11 +146,11 @@ func (d *dialer) DialContext(ctx context.Context, network, address string) (net.
 	} else if ips, err = d.resolve.LookupNetIP(ctx, ipNetwork(network), host); err != nil {
 		return nil, err
 	}
-	var refusedIPs []netip.Addr
+	var refusals []string
 	var dialErr error
 	for _, ip := range ips {
-		if !Public(ip) {
-			refusedIPs = append(refusedIPs, ip)
+		if why := d.policy.addrRefusal(ip); why != "" {
+			refusals = append(refusals, ip.String()+" "+why)
 			continue
 		}
 		conn, err := d.dial(ctx, network, netip.AddrPortFrom(ip, uint16(port)).String())
@@ -166,8 +167,8 @@ func (d *dialer) DialContext(ctx context.Context, network, address string) (net.
 	if dialErr != nil {
 		return nil, dialErr
 	}
-	if len(refusedIPs) > 0 {
-		return nil, refused("host %s resolves to %v, which is not public", host, refusedIPs)
+	if len(refusals) > 0 {
+		return nil, refused("host %s has no address kuzl may dial: %s", host, strings.Join(refusals, "; "))
 	}
 	return nil, &net.DNSError{Err: "no addresses", Name: host, IsNotFound: true}
 }
@@ -184,15 +185,15 @@ func ipNetwork(network string) string {
 }
 
 // control is the last check, run by net.Dialer on the address of the socket
-// about to connect. dialer already dials public IPs only; this holds even if
-// a later change to it doesn't.
-func control(_, address string, _ syscall.RawConn) error {
+// about to connect. dialer already dials allowed IPs only; this holds even
+// if a later change to it doesn't.
+func (p *Policy) control(_, address string, _ syscall.RawConn) error {
 	ap, err := netip.ParseAddrPort(address)
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", address, err)
 	}
-	if !Public(ap.Addr()) {
-		return refused("address %s is not public", ap.Addr())
+	if why := p.addrRefusal(ap.Addr()); why != "" {
+		return refused("address %s %s", ap.Addr(), why)
 	}
 	return nil
 }
