@@ -63,14 +63,14 @@ func newFakeNet(t *testing.T) *fakeNet {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/to":
-			http.Redirect(w, r, r.URL.Query().Get("u"), http.StatusFound)
+			http.Redirect(w, r, r.URL.Query().Get("u"), http.StatusFound) //nolint:gosec // G710: the open redirect is what the test needs.
 		case "/loop":
 			http.Redirect(w, r, "/loop", http.StatusFound)
 		case "/headers":
-			_, _ = io.WriteString(w, r.Host+" auth="+r.Header.Get("Authorization")+
+			_, _ = io.WriteString(w, r.Host+" auth="+r.Header.Get("Authorization")+ //nolint:gosec // G705: a plain-text echo for the test.
 				" cookie="+r.Header.Get("Cookie")+" trace="+r.Header.Get("X-Trace"))
 		default:
-			_, _ = io.WriteString(w, "hello from "+r.Host)
+			_, _ = io.WriteString(w, "hello from "+r.Host) //nolint:gosec // G705: a plain-text echo for the test.
 		}
 	}))
 	t.Cleanup(srv.Close)
@@ -114,7 +114,7 @@ func get(c *http.Client, url string, header ...string) (string, int, error) {
 	return string(body), resp.StatusCode, err
 }
 
-func follow(max int) Options { return Options{FollowRedirects: true, MaxRedirects: max} }
+func follow(n int) Options { return Options{FollowRedirects: true, MaxRedirects: n} }
 
 func TestClientDialsOnlyPublicAddresses(t *testing.T) {
 	tests := []struct {
@@ -288,7 +288,7 @@ func TestClientDropsCredentialsOffOrigin(t *testing.T) {
 // The real client, with the real resolver and dialer, can't reach the
 // loopback test server under any name.
 func TestRealClientRefusesLoopback(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		t.Error("the test server was reached")
 	}))
 	defer srv.Close()

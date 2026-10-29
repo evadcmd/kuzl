@@ -124,7 +124,7 @@ func normalizeHost(host string) (string, error) {
 		return "", fmt.Errorf("empty host")
 	}
 	for _, c := range []byte(host) {
-		if !('a' <= c && c <= 'z' || '0' <= c && c <= '9' || c == '-' || c == '.' || c == '_') {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' && c != '.' && c != '_' {
 			return "", fmt.Errorf("%q: a host name must be ASCII letters, digits, '-', '_' and '.' (use punycode)", host)
 		}
 	}
