@@ -97,6 +97,11 @@ func TestParseEntryErrors(t *testing.T) {
 		"deny_addrs:\n  - 10.1.2.3/8\n":             `line 2: "10.1.2.3/8" has host bits set; did you mean 10.0.0.0/8?`,
 		"deny_addrs:\n  - fe80::1%eth0\n":           `line 2: "fe80::1%eth0": an address with a zone is not supported`,
 		"deny_addrs:\n  - 8.8.8.8\n  - example.com": `line 3: "example.com" is not an IP or CIDR prefix`,
+		// yaml would drop a null item rather than decode it.
+		"deny_hosts: [a.example, ~]\n":          "line 1: an entry should be a string, not !!null",
+		"deny_addrs:\n  - 8.8.8.8\n  -\n":       "line 3: an entry should be a string, not !!null",
+		"allow_hosts: [null]\n":                 "line 1: an entry should be a string, not !!null",
+		"deny_hosts: &n ~\nallow_hosts: [*n]\n": "line 2: an entry should be a string, not !!null",
 	} {
 		_, err := Parse([]byte(doc))
 		if _, ok := errors.AsType[*EntryError](err); !ok || err.Error() != want {

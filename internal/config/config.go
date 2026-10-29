@@ -37,12 +37,28 @@ var builtin string
 type file struct {
 	// AllowHosts, if set, are the only hosts requests may go to; left out,
 	// every public host is. Set, it can't be empty or null.
-	AllowHosts *[]hostPattern `yaml:"allow_hosts"`
+	AllowHosts *list[hostPattern] `yaml:"allow_hosts"`
 	// DenyHosts are refused, even if AllowHosts matches them.
-	DenyHosts *[]hostPattern `yaml:"deny_hosts"`
+	DenyHosts *list[hostPattern] `yaml:"deny_hosts"`
 	// DenyAddrs are IPs and CIDR prefixes refused on top of the non-public
 	// addresses, checked on the address dialed.
-	DenyAddrs *[]addrRange `yaml:"deny_addrs"`
+	DenyAddrs *list[addrRange] `yaml:"deny_addrs"`
+}
+
+// list is a list of entries. yaml drops a null item from a slice without
+// calling its UnmarshalYAML, so list checks for one itself: like 1.5, a null
+// is a mistake, not an entry to skip.
+type list[T any] []T
+
+func (l *list[T]) UnmarshalYAML(n *yaml.Node) error {
+	for _, item := range n.Content {
+		// ShortTag is an alias's target's, so *n with &n ~ is caught too.
+		if item.ShortTag() == "!!null" {
+			_, err := str(item)
+			return entryErr(item, err)
+		}
+	}
+	return n.Decode((*[]T)(l))
 }
 
 type hostPattern struct{ netguard.HostPattern }
@@ -160,7 +176,7 @@ func allowHostsNull(data []byte) bool {
 	return keys.AllowHosts.Kind != 0
 }
 
-func deref[T any](p *[]T) []T {
+func deref[L ~[]T, T any](p *L) L {
 	if p == nil {
 		return nil
 	}
