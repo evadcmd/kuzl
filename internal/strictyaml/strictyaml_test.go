@@ -105,7 +105,7 @@ evens: [2, 3, 4, 5]
 limits:
   tags: tag
   maxx: 1
-nmae: kuzl
+nam: kuzl
 evens: [2]
 `), &m)
 	wantErrors(t, err,
@@ -115,7 +115,7 @@ evens: [2]
 		FieldError{"limits.tags", 4, "should be a list"},
 		FieldError{"limits.maxx", 5, "unknown field"},
 		FieldError{"limits.max", 4, "field required"},
-		FieldError{"nmae", 6, "unknown field"},
+		FieldError{"nam", 6, "unknown field"},
 		FieldError{"evens", 7, "duplicate field"},
 		FieldError{"name", 1, "field required"},
 	)
