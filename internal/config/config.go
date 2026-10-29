@@ -1,7 +1,6 @@
 // Package config is kuzl's policy file: a YAML document built into the
-// binary, so that what an agent runs can't change it, and kept out of the
-// repo, so that changing it takes a rebuild rather than a commit. The
-// Makefile builds it in:
+// binary, so that what an agent runs can't change it. The Makefile builds
+// the repo's policy.yaml in, or another file:
 //
 //	make build POLICY=/path/to/policy.yaml
 //
@@ -11,7 +10,7 @@
 //
 // The file is decoded strictly: an unknown key is an error rather than
 // ignored, so a typo such as deny_host can't quietly drop a list.
-// policy.example.yaml lists the keys.
+// policy.yaml lists the keys.
 package config
 
 import (

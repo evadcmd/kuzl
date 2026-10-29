@@ -13,9 +13,6 @@
 /dist/
 /build/
 
-# The network policy, built in with make build POLICY=...
-/policy.yaml
-
 # Go workspace
 go.work.sum
 

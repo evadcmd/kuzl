@@ -18,7 +18,7 @@ doesn't fetch anything yet; that is step 3.
 ## Testing locally
 
 ```sh
-make build POLICY=policy.yaml   # or plain make build, for no policy
+make build   # builds policy.yaml in; POLICY=other.yaml for another, POLICY= for none
 bin/kuzl policy
 bin/kuzl curl --help
 ```
@@ -30,8 +30,9 @@ has a `curl` symlink: it would shadow the real one.
 ### Network policy
 
 The policy is a YAML file built into the binary, so an agent running kuzl
-can't change it, and kept out of the repo, so changing it is a rebuild, not
-a commit. [`policy.example.yaml`](policy.example.yaml) lists the keys:
+can't change it. [`policy.yaml`](policy.yaml) is the one `make build` uses,
+with the reason for each entry; `make build POLICY=...` builds another file
+in instead. The keys:
 
 - `deny_hosts`: hosts refused. `example.com` matches that host only,
   `"*.example.com"` its subdomains (not `example.com` itself). Quote entries

@@ -1,10 +1,11 @@
-# make build                          bin/kuzl without a policy: every public host
-# make build POLICY=/path/policy.yaml  bin/kuzl with that policy built in
+# make build                          bin/kuzl with policy.yaml built in
+# make build POLICY=/path/policy.yaml  with that policy instead
+# make build POLICY=                   without a policy: every public host
 #
-# The policy lives outside the repo (policy.yaml here is gitignored), so that
-# changing it takes a rebuild, not a commit. See policy.example.yaml.
+# The policy is built in, not read at run time, so that an agent running
+# kuzl can't change it. See policy.yaml.
 
-POLICY ?=
+POLICY ?= policy.yaml
 LDFLAGS :=
 
 ifneq ($(POLICY),)
