@@ -42,7 +42,8 @@ type IO struct {
 //
 // The log record names the command and the flags that were set, but carries
 // no positional args or flag values: those can be URLs with tokens in their
-// query, or headers.
+// query, or headers. Nor does it carry the error's message, which cobra and
+// pflag write with the offending arg in it; the record has the error's kind.
 func Run(args []string, s IO) int {
 	log := s.Log
 	if log == nil {
@@ -66,13 +67,13 @@ func Run(args []string, s IO) int {
 		"duration_ms", time.Since(start).Milliseconds(),
 	}
 	if err != nil {
-		code := exitError
+		code, kind := exitError, "error"
 		_, _ = fmt.Fprintf(s.ErrOut, "%s: %v\n", name, err)
-		if fe, ok := errors.AsType[*flagError](err); ok {
-			code = exitUsage
-			_, _ = fmt.Fprintf(s.ErrOut, "Run '%s --help' for usage.\n", fe.cmdPath)
+		if ue, ok := errors.AsType[*usageError](err); ok {
+			code, kind = exitUsage, "usage"
+			_, _ = fmt.Fprintf(s.ErrOut, "Run '%s --help' for usage.\n", ue.cmdPath)
 		}
-		log.Error("run", append(attrs, "exit_code", code, "error", err)...)
+		log.Error("run", append(attrs, "exit_code", code, "error_kind", kind)...)
 		return code
 	}
 	log.Info("run", append(attrs, "exit_code", exitOK)...)
@@ -119,7 +120,7 @@ func newRoot(use, short string, s IO) *cobra.Command {
 		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Args:          cobra.NoArgs,
+		Args:          noArgs,
 		RunE:          func(c *cobra.Command, _ []string) error { return c.Help() },
 	}
 	cmd.CompletionOptions.DisableDefaultCmd = true
@@ -134,17 +135,27 @@ func newRoot(use, short string, s IO) *cobra.Command {
 		if c.HasSubCommands() && c.Flags().NArg() > 0 {
 			err = fmt.Errorf("unknown command %q for %q", c.Flags().Arg(0), c.CommandPath())
 		}
-		return &flagError{err: err, cmdPath: c.CommandPath()}
+		return &usageError{err: err, cmdPath: c.CommandPath()}
 	})
 	return cmd
 }
 
-// flagError is a flag parsing error, which Run follows with a pointer to the
-// command's help.
-type flagError struct {
+// noArgs is cobra.NoArgs as a usage error, so that kuzl bogus exits as
+// kuzl wget -O x does: cobra reports the first in its args check and the
+// second in flag parsing.
+func noArgs(c *cobra.Command, args []string) error {
+	if err := cobra.NoArgs(c, args); err != nil {
+		return &usageError{err: err, cmdPath: c.CommandPath()}
+	}
+	return nil
+}
+
+// usageError is a command line the command can't use, such as an unknown
+// flag or command, which Run follows with a pointer to the command's help.
+type usageError struct {
 	err     error
 	cmdPath string
 }
 
-func (e *flagError) Error() string { return e.err.Error() }
-func (e *flagError) Unwrap() error { return e.err }
+func (e *usageError) Error() string { return e.err.Error() }
+func (e *usageError) Unwrap() error { return e.err }

@@ -59,22 +59,22 @@ func TestRunReportsFlagErrorsWithoutUsage(t *testing.T) {
 	}
 }
 
+// An unknown command is a command line kuzl can't use, as an unknown flag is.
 func TestRunRejectsUnknownCommands(t *testing.T) {
 	tests := []struct {
 		args []string
 		want string
-		code int
 	}{
-		{[]string{"kuzl", "bogus"}, `kuzl: unknown command "bogus" for "kuzl"`, exitError},
+		{[]string{"kuzl", "bogus"}, `kuzl: unknown command "bogus" for "kuzl"` + "\nRun 'kuzl --help' for usage.\n"},
 		// An unknown command followed by a flag is still an unknown command,
 		// not an unknown flag of its parent.
-		{[]string{"kuzl", "wget", "-O", "x"}, `kuzl: unknown command "wget" for "kuzl"` + "\nRun 'kuzl --help' for usage.\n", exitUsage},
+		{[]string{"kuzl", "wget", "-O", "x"}, `kuzl: unknown command "wget" for "kuzl"` + "\nRun 'kuzl --help' for usage.\n"},
 	}
 	for _, tt := range tests {
 		t.Run(strings.Join(tt.args, " "), func(t *testing.T) {
 			code, stdout, stderr := run(tt.args...)
-			if code != tt.code || stdout != "" || !strings.HasPrefix(stderr, tt.want) {
-				t.Errorf("got (%d, %q, %q), want (%d, \"\", %q...)", code, stdout, stderr, tt.code, tt.want)
+			if code != exitUsage || stdout != "" || stderr != tt.want {
+				t.Errorf("got (%d, %q, %q), want (%d, \"\", %q)", code, stdout, stderr, exitUsage, tt.want)
 			}
 		})
 	}
@@ -113,7 +113,7 @@ func TestRunLogsOneRecordOffTheOutput(t *testing.T) {
 		t.Fatalf("log = %q, want one JSON record: %v", logged.String(), err)
 	}
 	if rec["level"] != "ERROR" || rec["name"] != "kuzl" || rec["command"] != "kuzl" ||
-		rec["exit_code"] != float64(code) || !strings.Contains(fmt.Sprint(rec["error"]), "bogus") {
+		rec["exit_code"] != float64(code) || rec["error_kind"] != "usage" {
 		t.Errorf("record = %v", rec)
 	}
 	if _, ok := rec["duration_ms"].(float64); !ok {
@@ -144,9 +144,34 @@ func TestRunLogsFlagNamesNotArgs(t *testing.T) {
 	}
 }
 
+// cobra and pflag quote the offending arg in their errors, which stderr shows
+// but the record must not.
+func TestRunLogsNoArgsOnError(t *testing.T) {
+	const secret = "SEKRET"
+	for _, args := range [][]string{
+		{"curl", "https://h/?token=" + secret},
+		{"curl", "-x" + secret},
+		{"curl", "--version=" + secret},
+		{"kuzl", secret},
+		{"kuzl", secret, "-O", "x"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var errOut, logged bytes.Buffer
+			log := slog.New(slog.NewJSONHandler(&logged, nil))
+			Run(args, IO{In: strings.NewReader(""), Out: &bytes.Buffer{}, ErrOut: &errOut, Log: log})
+			if !strings.Contains(errOut.String(), secret) {
+				t.Fatalf("stderr = %q, want the error to quote the arg", errOut.String())
+			}
+			if strings.Contains(logged.String(), secret) {
+				t.Errorf("log = %q, want no args", logged.String())
+			}
+		})
+	}
+}
+
 func TestRunHasNoCompletionCommand(t *testing.T) {
 	code, _, stderr := run("kuzl", "completion", "bash")
-	if code != exitError || !strings.Contains(stderr, `unknown command "completion"`) {
+	if code != exitUsage || !strings.Contains(stderr, `unknown command "completion"`) {
 		t.Errorf("got (%d, %q), want an unknown command error", code, stderr)
 	}
 }
