@@ -32,10 +32,10 @@ import (
 var builtin string
 
 // file is the policy file. A pointer field is an optional key: nil is the
-// key left out, or set to null.
+// key left out, or set to null. Parse tells the two apart for AllowHosts.
 type file struct {
 	// AllowHosts, if set, are the only hosts requests may go to; left out,
-	// every public host is. Set, it can't be empty.
+	// every public host is. Set, it can't be empty or null.
 	AllowHosts *[]hostPattern `yaml:"allow_hosts"`
 	// DenyHosts are refused, even if AllowHosts matches them.
 	DenyHosts *[]hostPattern `yaml:"deny_hosts"`
@@ -107,7 +107,9 @@ func Parse(data []byte) (netguard.Rules, error) {
 		}
 		return netguard.Rules{}, err
 	}
-	if f.AllowHosts != nil && len(*f.AllowHosts) == 0 {
+	// Like an empty list, a null one (every entry commented out under
+	// allow_hosts:) would allow every public host.
+	if f.AllowHosts == nil && allowHostsNull(data) || f.AllowHosts != nil && len(*f.AllowHosts) == 0 {
 		return netguard.Rules{}, errors.New("allow_hosts should not be empty; leave it out to allow every public host")
 	}
 	var r netguard.Rules
@@ -140,6 +142,17 @@ func decodeFile(data []byte) (file, error) {
 		return file{}, err
 	}
 	return file{}, fmt.Errorf("line %d: the policy should be one YAML document, without ---", rest.Line)
+}
+
+// allowHostsNull reports whether data has the allow_hosts key with a null
+// value, which yaml decodes as the key left out. A custom type can't see it
+// either: yaml doesn't call UnmarshalYAML for a null.
+func allowHostsNull(data []byte) bool {
+	var keys struct {
+		AllowHosts yaml.Node `yaml:"allow_hosts"`
+	}
+	_ = yaml.Unmarshal(data, &keys) // data already decoded once without error
+	return keys.AllowHosts.Kind != 0
 }
 
 func deref[T any](p *[]T) []T {

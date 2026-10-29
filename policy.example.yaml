@@ -19,7 +19,8 @@ deny_hosts:
   - "*.evil.example"
 
 # If set, the only hosts requests may go to (deny_hosts still wins). Left
-# out, every public host is allowed; it can't be an empty list.
+# out, every public host is allowed. It can't be empty: with every entry
+# commented out, comment out the allow_hosts: line too.
 # allow_hosts:
 #   - api.example.com
 #   - "*.example.org"

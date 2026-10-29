@@ -105,10 +105,19 @@ func TestParseEntryErrors(t *testing.T) {
 	}
 }
 
+// An empty or null allow_hosts would allow every public host, which is what
+// leaving it out is for.
 func TestParseRefusesEmptyAllowList(t *testing.T) {
 	want := "allow_hosts should not be empty; leave it out to allow every public host"
-	if _, err := Parse([]byte("allow_hosts: []\n")); err == nil || err.Error() != want {
-		t.Errorf("err = %v, want %q", err, want)
+	for _, doc := range []string{
+		"allow_hosts: []\n",
+		"allow_hosts:\n#  - api.example.com\n",
+		"allow_hosts: ~\n",
+		"deny_hosts: [a.example]\nallow_hosts: null\n",
+	} {
+		if _, err := Parse([]byte(doc)); err == nil || err.Error() != want {
+			t.Errorf("Parse(%q) = %v, want %q", doc, err, want)
+		}
 	}
 }
 
