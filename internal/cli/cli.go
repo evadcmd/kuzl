@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/evadcmd/kuzl/internal/config"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -93,8 +94,27 @@ func newCommand(name string, s IO) *cobra.Command {
 		return newCurlCmd(s)
 	default:
 		cmd := newRoot("kuzl", "A read-only curl for agents", s)
-		cmd.AddCommand(newCurlCmd(s))
+		cmd.AddCommand(newCurlCmd(s), newPolicyCmd(s))
 		return cmd
+	}
+}
+
+// newPolicyCmd prints the policy built into the binary, normalized, to check
+// what a build took in. The policy isn't a secret; only the build can change
+// it.
+func newPolicyCmd(s IO) *cobra.Command {
+	return &cobra.Command{
+		Use:   "policy",
+		Short: "Print the network policy built into this binary",
+		Args:  noArgs,
+		RunE: func(*cobra.Command, []string) error {
+			r, err := config.Builtin()
+			if err != nil {
+				return err
+			}
+			_, err = s.Out.Write(config.Format(r))
+			return err
+		},
 	}
 }
 

@@ -169,6 +169,26 @@ func TestRunLogsNoArgsOnError(t *testing.T) {
 	}
 }
 
+// kuzl policy prints the built-in policy; tests build without one. Only
+// kuzl has it: as curl, the binary has nothing but curl's command line.
+func TestRunPolicy(t *testing.T) {
+	code, stdout, stderr := run("kuzl", "policy")
+	if want := "# allow_hosts is left out: every public host is allowed.\ndeny_hosts: []\ndeny_addrs: []\n"; code != exitOK || stdout != want || stderr != "" {
+		t.Errorf("got (%d, %q, %q), want (%d, %q, \"\")", code, stdout, stderr, exitOK, want)
+	}
+	if code, _, _ := run("kuzl", "policy", "extra"); code != exitUsage {
+		t.Errorf("kuzl policy extra: exit %d, want %d", code, exitUsage)
+	}
+	_, stdout, _ = run("kuzl", "--help")
+	if !strings.Contains(stdout, "  policy ") {
+		t.Errorf("kuzl help = %q, want policy listed", stdout)
+	}
+	_, stdout, _ = run("curl", "--help")
+	if strings.Contains(stdout, "policy") {
+		t.Errorf("curl help = %q, want no policy command", stdout)
+	}
+}
+
 func TestRunHasNoCompletionCommand(t *testing.T) {
 	code, _, stderr := run("kuzl", "completion", "bash")
 	if code != exitUsage || !strings.Contains(stderr, `unknown command "completion"`) {

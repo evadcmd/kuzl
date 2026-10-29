@@ -1,0 +1,34 @@
+# kuzl's network policy, built into the binary:
+#
+#   cp policy.example.yaml policy.yaml   # gitignored; or keep it elsewhere
+#   make build POLICY=policy.yaml
+#
+# Every key may be left out. An unknown key, or an entry that isn't valid,
+# fails the build with every error and its line, rather than being skipped.
+#
+# Whatever this says, only http and https are fetched, and loopback, private,
+# link-local (the cloud metadata endpoint included) and the other non-public
+# addresses are never dialed.
+
+# Hosts requests may not go to. example.com is that host only;
+# "*.example.com" is its subdomains, not example.com itself. Quote entries
+# starting with *: unquoted, YAML reads them as an alias.
+deny_hosts:
+  - github.com
+  - raw.githubusercontent.com
+  - "*.evil.example"
+
+# If set, the only hosts requests may go to (deny_hosts still wins). Left
+# out, every public host is allowed; it can't be an empty list.
+# allow_hosts:
+#   - api.example.com
+#   - "*.example.org"
+
+# IPs and CIDR prefixes that are never dialed, on top of the non-public ones.
+# They are checked on the address a name resolves to, so a name can't get
+# around them. Write IPv4 ranges as IPv4. (These examples are documentation
+# ranges, which are refused anyway.)
+deny_addrs:
+  - 192.0.2.1
+  - 198.51.100.0/24
+  - 2001:db8::/32

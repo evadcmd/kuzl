@@ -7,9 +7,28 @@ import (
 	"testing"
 )
 
-func mustPolicy(t *testing.T, allow, deny []string) *Policy {
+func mustPolicy(t *testing.T, allow, deny []string, denyAddrs ...string) *Policy {
 	t.Helper()
-	p, err := NewPolicy(allow, deny)
+	var r Rules
+	for _, s := range allow {
+		r.AllowHosts = append(r.AllowHosts, mustHost(t, s))
+	}
+	for _, s := range deny {
+		r.DenyHosts = append(r.DenyHosts, mustHost(t, s))
+	}
+	for _, s := range denyAddrs {
+		p, err := ParseAddrRange(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.DenyAddrs = append(r.DenyAddrs, p)
+	}
+	return NewPolicy(r)
+}
+
+func mustHost(t *testing.T, s string) HostPattern {
+	t.Helper()
+	p, err := ParseHostPattern(s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,60 +51,67 @@ func wantRefused(t *testing.T, err error, substr string) {
 	}
 }
 
-func TestFromEnv(t *testing.T) {
-	env := map[string]string{
-		EnvAllowHosts: " example.com, *.example.org ,,",
-		EnvDenyHosts:  "GitHub.com.",
-	}
-	p, err := FromEnv(func(k string) string { return env[k] })
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := &Policy{
-		allow: []pattern{{host: "example.com"}, {host: "example.org", sub: true}},
-		deny:  []pattern{{host: "github.com"}},
-	}
-	if !equalPatterns(p.allow, want.allow) || !equalPatterns(p.deny, want.deny) {
-		t.Errorf("FromEnv = %+v, want %+v", p, want)
-	}
-
-	p, err = FromEnv(func(string) string { return "" })
-	if err != nil || len(p.allow)+len(p.deny) != 0 {
-		t.Errorf("FromEnv(unset) = %+v, %v; want an empty policy", p, err)
-	}
-}
-
-func equalPatterns(a, b []pattern) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
+func TestParseHostPattern(t *testing.T) {
+	for in, want := range map[string]string{
+		"example.com":      "example.com",
+		"GitHub.com.":      "github.com",
+		"*.Example.ORG":    "*.example.org",
+		"1.2.3.4":          "1.2.3.4",
+		"2001:4860::1":     "2001:4860::1",
+		"::ffff:1.2.3.4":   "1.2.3.4",
+		"64:ff9b::102:304": "1.2.3.4",
+	} {
+		p, err := ParseHostPattern(in)
+		if err != nil || p.String() != want {
+			t.Errorf("ParseHostPattern(%q) = %v, %v; want %s", in, p, err, want)
 		}
 	}
-	return true
-}
-
-// A bad entry fails the whole policy: skipping it would allow what it meant
-// to deny.
-func TestNewPolicyRejectsBadEntries(t *testing.T) {
-	for _, entry := range []string{
-		"*", "*.", "*example.com", "ex*.com", "example.*", "https://example.com",
+	// A bad entry is an error, never skipped: skipping it would allow what it
+	// meant to deny.
+	for _, in := range []string{
+		"", "*", "*.", "*example.com", "ex*.com", "example.*", "https://example.com",
 		"example.com:443", "example.com/path", "ｇithub.com", "*.1.2.3.4", "fe80::1%eth0",
 	} {
-		_, err := NewPolicy(nil, []string{entry})
-		if err == nil || !strings.HasPrefix(err.Error(), EnvDenyHosts+": ") {
-			t.Errorf("NewPolicy(deny %q) = %v, want an error naming %s", entry, err, EnvDenyHosts)
+		if p, err := ParseHostPattern(in); err == nil {
+			t.Errorf("ParseHostPattern(%q) = %v, want an error", in, p)
 		}
 	}
-	if _, err := NewPolicy([]string{"*.x"}, []string{"1.2.3.4", "2001:4860::1", "*.example.com"}); err != nil {
-		t.Errorf("NewPolicy with valid entries = %v, want ok", err)
+}
+
+func TestParseAddrRange(t *testing.T) {
+	for in, want := range map[string]string{
+		"8.8.4.4":        "8.8.4.4/32",
+		"10.0.0.0/8":     "10.0.0.0/8",
+		"2001:4860::1":   "2001:4860::1/128",
+		"2606:4700::/32": "2606:4700::/32",
+		"64:ff9b::/95":   "64:ff9b::/95",
+		"0.0.0.0/0":      "0.0.0.0/0",
+	} {
+		p, err := ParseAddrRange(in)
+		if err != nil || p.String() != want {
+			t.Errorf("ParseAddrRange(%q) = %v, %v; want %s", in, p, err, want)
+		}
+	}
+	for in, want := range map[string]string{
+		"":                  "not an IP or CIDR",
+		"example.com":       "not an IP or CIDR",
+		"10.0.0.0/33":       "not an IP or CIDR",
+		"10.1.2.3/8":        "did you mean 10.0.0.0/8?",
+		"fe80::1%eth0":      "zone",
+		"::ffff:1.2.3.4":    "IPv4 form",
+		"::ffff:0.0.0.0/96": "IPv4 form",
+		"64:ff9b::102:304":  "IPv4 form",
+		"64:ff9b::/96":      "IPv4 form",
+	} {
+		if _, err := ParseAddrRange(in); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("ParseAddrRange(%q) = %v, want an error containing %q", in, err, want)
+		}
 	}
 }
 
 func TestCheckURL(t *testing.T) {
-	deny := mustPolicy(t, nil, []string{"github.com", "raw.githubusercontent.com", "*.evil.test", "8.8.4.4"})
+	deny := mustPolicy(t, nil, []string{"github.com", "raw.githubusercontent.com", "*.evil.test", "8.8.4.4"},
+		"9.9.9.0/24", "2620:fe::/48")
 	allow := mustPolicy(t, []string{"api.example.com", "*.example.org", "8.8.8.8"}, []string{"bad.example.org"})
 
 	tests := []struct {
@@ -98,20 +124,27 @@ func TestCheckURL(t *testing.T) {
 		{deny, "https://api.github.com/repos", ""}, // github.com is exact
 		{deny, "https://8.8.8.8/", ""},
 		{deny, "https://[2606:4700::1111]/", ""},
-		{deny, "https://github.com/x", "host github.com is denied by KUZL_DENY_HOSTS"},
+		{deny, "https://github.com/x", "host github.com is in deny_hosts"},
 		// Other spellings of a denied host.
-		{deny, "https://GitHub.COM/x", "denied"},
-		{deny, "https://github.com./x", "denied"},
-		{deny, "https://github.com../x", "denied"},
-		{deny, "https://github.com:443/x", "denied"},
+		{deny, "https://GitHub.COM/x", "deny_hosts"},
+		{deny, "https://github.com./x", "deny_hosts"},
+		{deny, "https://github.com../x", "deny_hosts"},
+		{deny, "https://github.com:443/x", "deny_hosts"},
 		{deny, "https://ｇithub.com/x", "must be ASCII"},
 		{deny, "https://gith%C3%BCb.com/x", "must be ASCII"},
-		{deny, "https://a.evil.test/", "denied"},
-		{deny, "https://a.b.evil.test/", "denied"},
+		{deny, "https://a.evil.test/", "deny_hosts"},
+		{deny, "https://a.b.evil.test/", "deny_hosts"},
 		{deny, "https://evil.test/", ""}, // *.evil.test is subdomains only
 		{deny, "https://notevil.test/", ""},
-		{deny, "https://8.8.4.4/", "denied"},
-		{deny, "https://[::ffff:8.8.4.4]/", "denied"},
+		{deny, "https://8.8.4.4/", "deny_hosts"},
+		{deny, "https://[::ffff:8.8.4.4]/", "deny_hosts"},
+		{deny, "https://[64:ff9b::808:404]/", "deny_hosts"}, // NAT64 spelling
+		// deny_addrs, in every spelling of the address.
+		{deny, "https://9.9.9.9/", "address 9.9.9.9 is in deny_addrs"},
+		{deny, "https://[::ffff:9.9.9.9]/", "address 9.9.9.9 is in deny_addrs"},
+		{deny, "https://[64:ff9b::909:909]/", "address 9.9.9.9 is in deny_addrs"},
+		{deny, "https://[2620:fe::fe]/", "address 2620:fe::fe is in deny_addrs"},
+		{deny, "https://9.9.10.1/", ""},
 		// Never public, whatever the lists say.
 		{deny, "http://127.0.0.1/", "address 127.0.0.1 is not public"},
 		{deny, "http://169.254.169.254/latest/meta-data/", "not public"},
@@ -132,10 +165,10 @@ func TestCheckURL(t *testing.T) {
 		{allow, "https://api.example.com/v1", ""},
 		{allow, "https://a.example.org/", ""},
 		{allow, "https://8.8.8.8/", ""},
-		{allow, "https://example.com/", "host example.com is not in KUZL_ALLOW_HOSTS"},
+		{allow, "https://example.com/", "host example.com is not in allow_hosts"},
 		{allow, "https://example.org/", "not in"},
 		{allow, "https://x.api.example.com/", "not in"},
-		{allow, "https://bad.example.org/", "denied"}, // deny wins
+		{allow, "https://bad.example.org/", "deny_hosts"}, // deny wins
 		{allow, "https://1.1.1.1/", "not in"},
 	}
 	for _, tt := range tests {
