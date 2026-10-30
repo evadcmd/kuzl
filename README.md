@@ -34,15 +34,17 @@ can't change it. [`policy.yaml`](policy.yaml) is the one `make build` uses,
 with the reason for each entry; `make build POLICY=...` builds another file
 in instead. The keys:
 
-- `deny_hosts`: hosts refused. `example.com` matches that host only,
-  `"*.example.com"` its subdomains (not `example.com` itself). Quote entries
-  starting with `*`: unquoted, YAML reads them as an alias.
-- `allow_hosts`: if set, the only hosts allowed (`deny_hosts` still wins).
-  Left out, every public host is; it can't be an empty list.
+- `allow_hosts`: the only hosts allowed. `example.com` matches that host
+  only, `"*.example.com"` its subdomains (not `example.com` itself), and
+  `"*"` every public host. Quote entries starting with `*`: unquoted, YAML
+  reads them as an alias.
+- `deny_hosts`: hosts refused, even if `allow_hosts` matches them.
 - `deny_addrs`: IPs and CIDR prefixes never dialed, checked on the address a
   name resolves to.
 
-Every key may be left out. An unknown key, a value of the wrong type or an
+Every key may be left out. A host not in `allow_hosts` is refused, so with
+`allow_hosts` left out, empty or null, and with no policy built in
+(`POLICY=`), every host is. An unknown key, a value of the wrong type or an
 invalid entry is an error, reported with its line, rather than skipped.
 `make build` runs `bin/kuzl policy`, which prints the policy as kuzl reads
 it, and fails the build if it doesn't validate.

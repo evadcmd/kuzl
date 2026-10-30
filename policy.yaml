@@ -11,22 +11,31 @@
 # link-local (the cloud metadata endpoint included) and the other non-public
 # addresses are never dialed.
 
-# Hosts requests may not go to. example.com is that host only;
-# "*.example.com" is its subdomains, not example.com itself. Quote entries
-# starting with *: unquoted, YAML reads them as an alias.
+# The only hosts requests may go to: left out or empty, no host is. A host
+# entry is example.com, that host only; "*.example.com", its subdomains, not
+# example.com itself; or "*", every public host. Quote entries starting with
+# *: unquoted, YAML reads them as an alias.
+#
+# The package registries' metadata, for checking a version or a release,
+# and the Go docs.
+allow_hosts:
+  - pypi.org
+  - files.pythonhosted.org
+  - proxy.golang.org
+  - sum.golang.org
+  - crates.io
+  - static.crates.io
+  - registry.npmjs.org
+  - pkg.go.dev
+
+# Hosts requests may not go to, even if allow_hosts matches them.
 #
 # These are the hosts taruza denies to WebFetch too (#1): it reaches GitHub
-# through ghzt instead.
+# through ghzt instead. allow_hosts leaves them out already; listing them
+# here keeps them refused if it ever widens, to "*" say.
 deny_hosts:
   - github.com
   - raw.githubusercontent.com
-
-# If set, the only hosts requests may go to (deny_hosts still wins). Left
-# out, as here, every public host is allowed. It can't be empty: with every
-# entry commented out, comment out the allow_hosts: line too.
-# allow_hosts:
-#   - api.example.com
-#   - "*.example.org"
 
 # IPs and CIDR prefixes that are never dialed, on top of the non-public ones.
 # They are checked on the address a name resolves to, so a name can't get

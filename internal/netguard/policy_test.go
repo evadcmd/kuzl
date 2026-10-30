@@ -56,6 +56,7 @@ func TestParseHostPattern(t *testing.T) {
 		"example.com":      "example.com",
 		"GitHub.com.":      "github.com",
 		"*.Example.ORG":    "*.example.org",
+		"*":                "*",
 		"1.2.3.4":          "1.2.3.4",
 		"2001:4860::1":     "2001:4860::1",
 		"::ffff:1.2.3.4":   "1.2.3.4",
@@ -69,7 +70,7 @@ func TestParseHostPattern(t *testing.T) {
 	// A bad entry is an error, never skipped: skipping it would allow what it
 	// meant to deny.
 	for _, in := range []string{
-		"", "*", "*.", "*example.com", "ex*.com", "example.*", "https://example.com",
+		"", "**", "*.", "*example.com", "ex*.com", "example.*", "https://example.com",
 		"example.com:443", "example.com/path", "ｇithub.com", "*.1.2.3.4", "fe80::1%eth0",
 	} {
 		if p, err := ParseHostPattern(in); err == nil {
@@ -110,9 +111,10 @@ func TestParseAddrRange(t *testing.T) {
 }
 
 func TestCheckURL(t *testing.T) {
-	deny := mustPolicy(t, nil, []string{"github.com", "raw.githubusercontent.com", "*.evil.test", "8.8.4.4"},
+	deny := mustPolicy(t, []string{"*"}, []string{"github.com", "raw.githubusercontent.com", "*.evil.test", "8.8.4.4"},
 		"9.9.9.0/24", "2620:fe::/48")
 	allow := mustPolicy(t, []string{"api.example.com", "*.example.org", "8.8.8.8"}, []string{"bad.example.org"})
+	none := mustPolicy(t, nil, nil)
 
 	tests := []struct {
 		policy *Policy
@@ -170,6 +172,11 @@ func TestCheckURL(t *testing.T) {
 		{allow, "https://x.api.example.com/", "not in"},
 		{allow, "https://bad.example.org/", "deny_hosts"}, // deny wins
 		{allow, "https://1.1.1.1/", "not in"},
+
+		// An empty allow list allows no host. (deny allows *, which still
+		// doesn't let a non-public address through, as above.)
+		{none, "https://example.com/", "host example.com is not allowed: allow_hosts is empty"},
+		{none, "https://8.8.8.8/", "allow_hosts is empty"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.url, func(t *testing.T) {

@@ -5,9 +5,10 @@
 // The rules come from the policy built into the binary (internal/config),
 // never from the command line or the environment:
 //   - Schemes are http and https only, and a URL can't carry credentials.
-//   - Host patterns: example.com matches that host only, and *.example.com
-//     matches its subdomains, not example.com itself. A denied host is
-//     refused; if any hosts are allowed, every other host is refused too.
+//   - Host patterns: example.com matches that host only, *.example.com
+//     matches its subdomains, not example.com itself, and * matches every
+//     host. A denied host is refused, and so is every host not allowed: with
+//     no allowed hosts, every host is.
 //   - Non-public addresses (see Public) and denied address ranges are always
 //     refused, checked on the address actually dialed, so a name that
 //     resolves to one, now or after a DNS change, can't reach it.
@@ -36,7 +37,8 @@ func refused(format string, args ...any) error {
 
 // Rules are what a Policy enforces, named as in the policy file.
 type Rules struct {
-	// AllowHosts, if not empty, are the only hosts requests may go to.
+	// AllowHosts are the only hosts requests may go to: an empty list allows
+	// none.
 	AllowHosts []HostPattern
 	// DenyHosts are refused, even if AllowHosts matches them.
 	DenyHosts []HostPattern
@@ -49,40 +51,49 @@ type Policy struct {
 	rules Rules
 }
 
-// NewPolicy returns a policy enforcing r. The zero Rules allow every public
-// host.
+// NewPolicy returns a policy enforcing r. The zero Rules allow no host.
 func NewPolicy(r Rules) *Policy {
 	return &Policy{rules: r}
 }
 
-// HostPattern is a host list entry: one host, or with a leading "*.", its
-// subdomains.
+// HostPattern is a host list entry: one host, with a leading "*.", its
+// subdomains, or "*" alone, every host.
 type HostPattern struct {
 	host string
 	sub  bool
+	all  bool
 }
 
-// ParseHostPattern parses a host list entry. Anything that isn't a host or
-// *.host is an error rather than skipped: a typo in the deny list mustn't
-// quietly allow the host.
+// ParseHostPattern parses a host list entry. Anything that isn't a host,
+// *.host or * is an error rather than skipped: a typo in the deny list
+// mustn't quietly allow the host.
 func ParseHostPattern(s string) (HostPattern, error) {
+	if s == "*" {
+		return HostPattern{all: true}, nil
+	}
 	host, sub := strings.CutPrefix(s, "*.")
 	norm, err := normalizeHost(host)
 	if err != nil || (sub && isIP(norm)) {
-		return HostPattern{}, fmt.Errorf("%q is not a host or *.host", s)
+		return HostPattern{}, fmt.Errorf("%q is not a host, *.host or *", s)
 	}
 	return HostPattern{host: norm, sub: sub}, nil
 }
 
 func (p HostPattern) String() string {
-	if p.sub {
+	switch {
+	case p.all:
+		return "*"
+	case p.sub:
 		return "*." + p.host
 	}
 	return p.host
 }
 
 func (p HostPattern) match(host string) bool {
-	if p.sub {
+	switch {
+	case p.all:
+		return true
+	case p.sub:
 		return strings.HasSuffix(host, "."+p.host)
 	}
 	return host == p.host
@@ -169,7 +180,10 @@ func (p *Policy) checkHost(host string) error {
 	if matchAny(p.rules.DenyHosts, host) {
 		return refused("host %s is in deny_hosts", host)
 	}
-	if len(p.rules.AllowHosts) > 0 && !matchAny(p.rules.AllowHosts, host) {
+	if allow := p.rules.AllowHosts; !matchAny(allow, host) {
+		if len(allow) == 0 {
+			return refused("host %s is not allowed: allow_hosts is empty, which allows no host", host)
+		}
 		return refused("host %s is not in allow_hosts", host)
 	}
 	if ip, err := netip.ParseAddr(host); err == nil {

@@ -97,7 +97,7 @@ func newFakeNet(t *testing.T) *fakeNet {
 
 func (f *fakeNet) client(t *testing.T, o Options) *http.Client {
 	t.Helper()
-	return mustPolicy(t, nil, []string{"denied.test"}, "1.0.0.0/24").client(o, f, f.dial)
+	return mustPolicy(t, []string{"*"}, []string{"denied.test"}, "1.0.0.0/24").client(o, f, f.dial)
 }
 
 func get(c *http.Client, url string, header ...string) (string, int, error) {
@@ -300,7 +300,7 @@ func TestRealClientRefusesLoopback(t *testing.T) {
 	}))
 	defer srv.Close()
 	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
-	c := mustPolicy(t, nil, nil).Client(Options{})
+	c := mustPolicy(t, []string{"*"}, nil).Client(Options{})
 	for _, host := range []string{"127.0.0.1", "[::ffff:127.0.0.1]", "localhost"} {
 		_, _, err := get(c, "http://"+host+":"+port+"/")
 		wantRefused(t, err, "not public")

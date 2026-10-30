@@ -45,8 +45,8 @@ deny_addrs:
 	}
 }
 
-// Every key is optional: an empty file, or one with only comments, allows
-// every public host.
+// Every key is optional: an empty file, or one with only comments, allows no
+// host.
 func TestParseEmpty(t *testing.T) {
 	for _, doc := range []string{"", "# nothing\n", "{}", "---\n{}\n", "deny_hosts:\ndeny_addrs: null\n"} {
 		r, err := Parse([]byte(doc))
@@ -54,7 +54,7 @@ func TestParseEmpty(t *testing.T) {
 			t.Errorf("Parse(%q) = %+v, %v; want empty rules", doc, r, err)
 		}
 	}
-	want := "# allow_hosts is left out: every public host is allowed.\ndeny_hosts: []\ndeny_addrs: []\n"
+	want := "# allow_hosts is empty: no host is allowed.\nallow_hosts: []\ndeny_hosts: []\ndeny_addrs: []\n"
 	r, _ := Parse(nil)
 	if got := string(Format(r)); got != want {
 		t.Errorf("Format(empty) = %q, want %q", got, want)
@@ -90,7 +90,7 @@ func TestParseTypeErrors(t *testing.T) {
 // it would allow what it meant to deny.
 func TestParseEntryErrors(t *testing.T) {
 	for doc, want := range map[string]string{
-		"deny_hosts:\n  - \"*example.com\"\n":       `line 2: "*example.com" is not a host or *.host`,
+		"deny_hosts:\n  - \"*example.com\"\n":       `line 2: "*example.com" is not a host, *.host or *`,
 		"deny_hosts: [ok.example, 1.5]\n":           "line 1: an entry should be a string, not !!float",
 		"deny_hosts:\n  - [a]\n":                    "line 2: an entry should be a string, not !!seq",
 		"allow_hosts:\n  - true\n":                  "line 2: an entry should be a string, not !!bool",
@@ -110,19 +110,30 @@ func TestParseEntryErrors(t *testing.T) {
 	}
 }
 
-// An empty or null allow_hosts would allow every public host, which is what
-// leaving it out is for.
-func TestParseRefusesEmptyAllowList(t *testing.T) {
-	want := "allow_hosts should not be empty; leave it out to allow every public host"
+// Empty or null, allow_hosts allows no host, as left out; "*" is every public
+// host.
+func TestParseAllowList(t *testing.T) {
 	for _, doc := range []string{
 		"allow_hosts: []\n",
 		"allow_hosts:\n#  - api.example.com\n",
 		"allow_hosts: ~\n",
 		"deny_hosts: [a.example]\nallow_hosts: null\n",
 	} {
-		if _, err := Parse([]byte(doc)); err == nil || err.Error() != want {
-			t.Errorf("Parse(%q) = %v, want %q", doc, err, want)
+		r, err := Parse([]byte(doc))
+		if err != nil || len(r.AllowHosts) != 0 {
+			t.Errorf("Parse(%q) = %+v, %v; want an empty allow_hosts", doc, r, err)
 		}
+	}
+	r, err := Parse([]byte("allow_hosts: [\"*\"]\n"))
+	if err != nil || len(r.AllowHosts) != 1 || r.AllowHosts[0].String() != "*" {
+		t.Fatalf("Parse(*) = %+v, %v; want allow_hosts *", r, err)
+	}
+	want := "allow_hosts:\n  - '*'\ndeny_hosts: []\ndeny_addrs: []\n"
+	if got := string(Format(r)); got != want {
+		t.Errorf("Format(*) = %q, want %q", got, want)
+	}
+	if again, err := Parse(Format(r)); err != nil || !reflect.DeepEqual(again, r) {
+		t.Errorf("Parse(Format(r)) = %+v, %v; want %+v", again, err, r)
 	}
 }
 
@@ -145,6 +156,7 @@ func TestParseUnquotedStar(t *testing.T) {
 		"deny_hosts: [*.evil.example]\n",
 		"deny_hosts: [a.example, *.evil.example]\n",
 		"deny_hosts: *.evil.example\n",
+		"allow_hosts: [*]\n",
 	} {
 		if _, err := Parse([]byte(doc)); err == nil || !strings.Contains(err.Error(), "must be quoted") {
 			t.Errorf("Parse(%q) = %v, want a hint to quote *", doc, err)

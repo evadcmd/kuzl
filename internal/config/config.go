@@ -28,14 +28,14 @@ import (
 )
 
 // builtin is the policy file, base64-encoded, as the build sets it. Empty is
-// no file, which allows every public host.
+// no file, which allows no host.
 var builtin string
 
 // file is the policy file. A pointer field is an optional key: nil is the
-// key left out, or set to null. Parse tells the two apart for AllowHosts.
+// key left out, or set to null.
 type file struct {
-	// AllowHosts, if set, are the only hosts requests may go to; left out,
-	// every public host is. Set, it can't be empty or null.
+	// AllowHosts are the only hosts requests may go to; "*" is every public
+	// host. Left out, empty or null, no host is.
 	AllowHosts *list[hostPattern] `yaml:"allow_hosts"`
 	// DenyHosts are refused, even if AllowHosts matches them.
 	DenyHosts *list[hostPattern] `yaml:"deny_hosts"`
@@ -127,11 +127,6 @@ func Parse(data []byte) (netguard.Rules, error) {
 		}
 		return netguard.Rules{}, err
 	}
-	// Like an empty list, a null one (every entry commented out under
-	// allow_hosts:) would allow every public host.
-	if f.AllowHosts == nil && allowHostsNull(data) || f.AllowHosts != nil && len(*f.AllowHosts) == 0 {
-		return netguard.Rules{}, errors.New("allow_hosts should not be empty; leave it out to allow every public host")
-	}
 	var r netguard.Rules
 	for _, p := range deref(f.AllowHosts) {
 		r.AllowHosts = append(r.AllowHosts, p.HostPattern)
@@ -164,17 +159,6 @@ func decodeFile(data []byte) (file, error) {
 	return file{}, fmt.Errorf("line %d: the policy should be one YAML document, without ---", rest.Line)
 }
 
-// allowHostsNull reports whether data has the allow_hosts key with a null
-// value, which yaml decodes as the key left out. A custom type can't see it
-// either: yaml doesn't call UnmarshalYAML for a null.
-func allowHostsNull(data []byte) bool {
-	var keys struct {
-		AllowHosts yaml.Node `yaml:"allow_hosts"`
-	}
-	_ = yaml.Unmarshal(data, &keys) // data already decoded once without error
-	return keys.AllowHosts.Kind != 0
-}
-
 func deref[L ~[]T, T any](p *L) L {
 	if p == nil {
 		return nil
@@ -203,11 +187,11 @@ func decode(encoded string) (netguard.Rules, error) {
 // returns r.
 func Format(r netguard.Rules) []byte {
 	var out struct {
-		AllowHosts []string `yaml:"allow_hosts,omitempty"`
+		AllowHosts []string `yaml:"allow_hosts"`
 		DenyHosts  []string `yaml:"deny_hosts"`
 		DenyAddrs  []string `yaml:"deny_addrs"`
 	}
-	out.DenyHosts, out.DenyAddrs = []string{}, []string{}
+	out.AllowHosts, out.DenyHosts, out.DenyAddrs = []string{}, []string{}, []string{}
 	for _, p := range r.AllowHosts {
 		out.AllowHosts = append(out.AllowHosts, p.String())
 	}
@@ -223,7 +207,7 @@ func Format(r netguard.Rules) []byte {
 	}
 	var b bytes.Buffer
 	if len(r.AllowHosts) == 0 {
-		b.WriteString("# allow_hosts is left out: every public host is allowed.\n")
+		b.WriteString("# allow_hosts is empty: no host is allowed.\n")
 	}
 	e := yaml.NewEncoder(&b)
 	e.SetIndent(2)

@@ -1,6 +1,6 @@
 # make build                          bin/kuzl with policy.yaml built in
 # make build POLICY=/path/policy.yaml  with that policy instead
-# make build POLICY=                   without a policy: every public host
+# make build POLICY=                   without a policy: no host allowed
 #
 # The policy is built in, not read at run time, so that an agent running
 # kuzl can't change it. See policy.yaml.
