@@ -88,13 +88,16 @@ func newFakeNet(t *testing.T) *fakeNet {
 			"down.test":       {"1.1.1.1"},
 			"downlocal.test":  {"127.0.0.1", "1.1.1.1"},
 			"empty.test":      {},
+			"banned.test":     {"1.0.0.1"},
+			"banned64.test":   {"64:ff9b::100:1"}, // 1.0.0.1 through NAT64
+			"partbanned.test": {"1.0.0.1", "8.8.8.8"},
 		},
 	}
 }
 
 func (f *fakeNet) client(t *testing.T, o Options) *http.Client {
 	t.Helper()
-	return mustPolicy(t, nil, []string{"denied.test"}).client(o, f, f.dial)
+	return mustPolicy(t, []string{"*"}, []string{"denied.test"}, "1.0.0.0/24").client(o, f, f.dial)
 }
 
 func get(c *http.Client, url string, header ...string) (string, int, error) {
@@ -123,11 +126,15 @@ func TestClientDialsOnlyPublicAddresses(t *testing.T) {
 		want   string // the refusal, or "" to succeed
 	}{
 		{"public.test", []string{"8.8.8.8:80"}, ""},
-		{"loopback.test", nil, "host loopback.test resolves to [127.0.0.1], which is not public"},
+		{"loopback.test", nil, "host loopback.test has no address kuzl may dial: 127.0.0.1 is not public"},
 		{"metadata.test", nil, "not public"},
 		{"mapped.test", nil, "not public"},
 		// Only the public address of a mixed answer is dialed.
 		{"mixed.test", []string{"8.8.8.8:80"}, ""},
+		// deny_addrs holds for names too, on the address they resolve to.
+		{"banned.test", nil, "host banned.test has no address kuzl may dial: 1.0.0.1 is in deny_addrs"},
+		{"banned64.test", nil, "64:ff9b::100:1 is in deny_addrs"},
+		{"partbanned.test", []string{"8.8.8.8:80"}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.host, func(t *testing.T) {
@@ -175,11 +182,11 @@ func TestClientChecksEveryRequest(t *testing.T) {
 		url  string
 		want string
 	}{
-		{"http://denied.test/", "host denied.test is denied"},
+		{"http://denied.test/", "host denied.test is in deny_hosts"},
 		{"https://127.0.0.1/", "not public"},
 		{"http://public.test/to?u=http://other.test/", ""},
-		{"http://public.test/to?u=http://denied.test/", "host denied.test is denied"},
-		{"http://public.test/to?u=http://DENIED.test./", "host denied.test is denied"},
+		{"http://public.test/to?u=http://denied.test/", "host denied.test is in deny_hosts"},
+		{"http://public.test/to?u=http://DENIED.test./", "host denied.test is in deny_hosts"},
 		{"http://public.test/to?u=http://127.0.0.1:8080/", "address 127.0.0.1 is not public"},
 		{"http://public.test/to?u=http://loopback.test/", "not public"},
 		{"http://public.test/to?u=http://[::ffff:169.254.169.254]/", "not public"},
@@ -293,7 +300,7 @@ func TestRealClientRefusesLoopback(t *testing.T) {
 	}))
 	defer srv.Close()
 	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
-	c := mustPolicy(t, nil, nil).Client(Options{})
+	c := mustPolicy(t, []string{"*"}, nil).Client(Options{})
 	for _, host := range []string{"127.0.0.1", "[::ffff:127.0.0.1]", "localhost"} {
 		_, _, err := get(c, "http://"+host+":"+port+"/")
 		wantRefused(t, err, "not public")
@@ -308,17 +315,18 @@ func TestControlRefusesNonPublic(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = ln.Close() }()
-	d := &net.Dialer{Control: control}
+	p := mustPolicy(t, nil, nil, "1.0.0.0/24")
+	d := &net.Dialer{Control: p.control}
 	_, err = d.DialContext(t.Context(), "tcp", ln.Addr().String())
 	wantRefused(t, err, "address 127.0.0.1 is not public")
 
 	for _, addr := range []string{"8.8.8.8:443", "[2606:4700::1111]:443"} {
-		if err := control("tcp", addr, nil); err != nil {
+		if err := p.control("tcp", addr, nil); err != nil {
 			t.Errorf("control(%s) = %v, want nil", addr, err)
 		}
 	}
-	for _, addr := range []string{"10.0.0.1:80", "[::1]:80", "[fe80::1%eth0]:80", "bogus"} {
-		if err := control("tcp", addr, nil); err == nil {
+	for _, addr := range []string{"10.0.0.1:80", "[::1]:80", "[fe80::1%eth0]:80", "bogus", "1.0.0.1:443", "[::ffff:1.0.0.1]:443"} {
+		if err := p.control("tcp", addr, nil); err == nil {
 			t.Errorf("control(%s) = nil, want an error", addr)
 		}
 	}
