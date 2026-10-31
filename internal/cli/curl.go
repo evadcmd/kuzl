@@ -25,11 +25,9 @@ import (
 )
 
 const (
-	// maxShowBytes caps what curl writes to stdout, headers included, so that
-	// one response can't fill the caller's context.
-	maxShowBytes = 100000
-	// maxCountBytes is how far past maxShowBytes a body is read to say how
-	// much was left out, when its length isn't known up front.
+	// maxCountBytes is how far past the stdout cap (the policy's
+	// max_stdout_bytes) a body is read to say how much was left out, when its
+	// length isn't known up front.
 	maxCountBytes = 100 << 20
 	// maxDownloadBytes caps the body -o writes, and --max-filesize.
 	maxDownloadBytes = 100 << 20
@@ -149,12 +147,22 @@ type curlFlags struct {
 	// Set by newRequest from the flags above.
 	outFile  string // the file -o or -O names; "" for stdout
 	maxBytes int64  // --max-filesize; 0 if not set
+
+	// maxShow caps what is written to stdout, headers included, so that one
+	// response can't fill the caller's context; set by RunE from the policy.
+	maxShow int
 }
 
 func newCurlCmd(s IO, rec *record) *cobra.Command {
 	cmd := newRoot("curl", "Fetch a URL with GET or HEAD", s)
 	cmd.Use = "curl [flags] <url>"
-	cmd.Long = `Fetch a URL with GET or HEAD and write the response body to stdout.
+	// The cap is the policy's; a policy that doesn't load fails the fetch
+	// anyway, so help shouldn't fail on it.
+	showCap := "the bytes the built-in policy allows"
+	if n, err := s.maxStdoutBytes(); err == nil {
+		showCap = fmt.Sprintf("%d bytes", n)
+	}
+	cmd.Long = fmt.Sprintf(`Fetch a URL with GET or HEAD and write the response body to stdout.
 
 Only http and https are fetched, and only from the hosts and public
 addresses this build allows; a URL without a scheme is http. Nothing local
@@ -162,7 +170,7 @@ is ever sent: flags that send data or read a file, such as -F, -T, -K, -b
 and -u, are refused with the reason. -d and --data-urlencode are taken only
 with -G, which puts them in the query string, and never read a file.
 
-Stdout stops after 100000 bytes, headers included, with a note on stderr.
+Stdout stops after %s, headers included, with a note on stderr.
 A body that isn't UTF-8 text is not written to stdout. -o and -O write the
 response to a file instead, up to 100 MiB, and only inside $KUZL_ROOT (the
 working directory if unset).
@@ -170,7 +178,7 @@ working directory if unset).
 Errors are curl's: "curl: (N) message" on stderr and exit code N, such as 6
 (couldn't resolve), 7 (couldn't connect), 22 (-f and HTTP >= 400), 28
 (timeout), 47 (too many redirects) and 63 (--max-filesize). A refused
-request exits 2 with the reason, even with -s.`
+request exits 2 with the reason, even with -s.`, showCap)
 	cmd.Args = func(c *cobra.Command, args []string) error {
 		if len(args) > 1 {
 			return &usageError{err: fmt.Errorf("expected one URL, got %d", len(args)), cmdPath: c.CommandPath()}
@@ -245,6 +253,9 @@ request exits 2 with the reason, even with -s.`
 		}
 		req, err := f.newRequest(c, args[0])
 		if err != nil {
+			return err
+		}
+		if f.maxShow, err = s.maxStdoutBytes(); err != nil {
 			return err
 		}
 		// A file outside the root is refused before anything is sent.
@@ -604,7 +615,7 @@ func seconds(s float64) time.Duration { return time.Duration(s * float64(time.Se
 
 // fetch sends req and writes the response: the headers of every hop with -i
 // or -I, then the body, to the file in root with -o or -O, or else to stdout,
-// capped at maxShowBytes. -w comes after, on stdout.
+// capped at maxShow. -w comes after, on stdout.
 func (f *curlFlags) fetch(ctx context.Context, s IO, req *http.Request, root *workspace.Root, rec *record) error {
 	if f.maxTime > 0 {
 		var cancel context.CancelFunc
@@ -686,7 +697,7 @@ func (f *curlFlags) writeResponse(s IO, req *http.Request, resp *http.Response, 
 	var size int64
 	more, moreExact := int64(0), true
 	if req.Method != http.MethodHead {
-		show := max(maxShowBytes+1-len(head), 0)
+		show := max(f.maxShow+1-len(head), 0)
 		body, bodyErr = io.ReadAll(io.LimitReader(resp.Body, int64(show)))
 		if bodyErr == nil && len(body) == show && (f.maxBytes == 0 || int64(show) <= f.maxBytes) {
 			rest := int64(maxCountBytes)
@@ -704,7 +715,7 @@ func (f *curlFlags) writeResponse(s IO, req *http.Request, resp *http.Response, 
 	}
 
 	data := append(head, body...)
-	n := capAt(data, maxShowBytes)
+	n := capAt(data, f.maxShow)
 	if shown := data[min(len(head), n):n]; bytes.IndexByte(shown, 0) >= 0 || !utf8.Valid(shown) {
 		if _, err := s.Out.Write(data[:min(len(head), n)]); err != nil {
 			return size, f.writeError(err)

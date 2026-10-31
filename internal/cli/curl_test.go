@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/evadcmd/kuzl/internal/config"
 	"github.com/evadcmd/kuzl/internal/netguard"
 	"github.com/evadcmd/kuzl/internal/workspace"
 )
@@ -399,23 +400,46 @@ func TestCurlNetworkErrors(t *testing.T) {
 	}
 }
 
+// With no policy built in, the cap is config.DefaultMaxStdoutBytes.
 func TestCurlCapsStdout(t *testing.T) {
 	f := newFakeNet(t)
-	all := strings.Repeat("b", maxShowBytes)
-	for _, q := range []string{"n=100005", "n=100005&chunked=1"} {
+	limit := config.DefaultMaxStdoutBytes
+	all := strings.Repeat("b", limit)
+	n := strconv.Itoa(limit)
+	for _, q := range []string{"n=" + strconv.Itoa(limit+5), "n=" + strconv.Itoa(limit+5) + "&chunked=1"} {
 		check(t, f, []string{"http://public.test/big?" + q}, want{exitOK, all, "… truncated, 5 more bytes; use -o to save it all\n"})
 	}
-	check(t, f, []string{"http://public.test/big?n=100000&chunked=1"}, want{exitOK, all, ""})
-	// The cut falls on a character boundary: é is two bytes, and the 100000th
-	// is its first.
-	s := "x" + strings.Repeat("é", maxShowBytes/2)
-	check(t, f, []string{"http://public.test/big?n=3&s=" + s}, want{exitOK, s[:maxShowBytes-1], "… truncated, 5 more bytes; use -o to save it all\n"})
+	check(t, f, []string{"http://public.test/big?n=" + n + "&chunked=1"}, want{exitOK, all, ""})
+	// The cut falls on a character boundary: é is two bytes, and the last one
+	// the cap allows is its first.
+	s := "x" + strings.Repeat("é", limit/2)
+	check(t, f, []string{"http://public.test/big?n=3&s=" + s}, want{exitOK, s[:limit-1], "… truncated, 5 more bytes; use -o to save it all\n"})
 
 	// Headers count towards the cap.
-	code, stdout, stderr := f.curl(t, "-i", "http://public.test/big?n=100000")
-	if code != exitOK || len(stdout) != maxShowBytes || !strings.HasPrefix(stdout, "HTTP/1.1 200 OK\r\n") ||
+	code, stdout, stderr := f.curl(t, "-i", "http://public.test/big?n="+n)
+	if code != exitOK || len(stdout) != limit || !strings.HasPrefix(stdout, "HTTP/1.1 200 OK\r\n") ||
 		!strings.HasPrefix(stderr, "… truncated, ") {
 		t.Errorf("-i: got (%d, %d bytes, %q)", code, len(stdout), stderr)
+	}
+	if code, stdout, _ := f.curl(t, "--help"); code != exitOK || !strings.Contains(stdout, "Stdout stops after "+n+" bytes,") {
+		t.Errorf("--help: got (%d, %q), want the cap in it", code, clip(stdout))
+	}
+}
+
+// The policy's max_stdout_bytes, as IO.MaxStdoutBytes stands in for it,
+// sets the cap.
+func TestCurlStdoutCapFromPolicy(t *testing.T) {
+	f := newFakeNet(t)
+	var out, errOut bytes.Buffer
+	s := f.io(t, &out, &errOut, nil)
+	s.MaxStdoutBytes = 10
+	code := Run([]string{"curl", "http://public.test/big?n=12"}, s)
+	if code != exitOK || out.String() != "bbbbbbbbbb" || errOut.String() != "… truncated, 2 more bytes; use -o to save it all\n" {
+		t.Errorf("got (%d, %q, %q), want 10 bytes and the note", code, out.String(), errOut.String())
+	}
+	out.Reset()
+	if code := Run([]string{"curl", "--help"}, s); code != exitOK || !strings.Contains(out.String(), "Stdout stops after 10 bytes,") {
+		t.Errorf("--help: got (%d, %q), want the cap in it", code, clip(out.String()))
 	}
 }
 
@@ -573,9 +597,11 @@ func TestCurlMaxFilesize(t *testing.T) {
 	check(t, f, []string{"--max-filesize", "10", "http://public.test/big?n=10&chunked=1"}, want{exitOK, "bbbbbbbbbb", ""})
 	check(t, f, []string{"--max-filesize", "1k", "http://public.test/big?n=1024&chunked=1"}, want{exitOK, strings.Repeat("b", 1024), ""})
 	// Past the stdout cap, it is the whole body that counts.
-	check(t, f, []string{"--max-filesize", "100001", "http://public.test/big?n=100002&chunked=1"}, want{exitFileSizeExceeded, "", tooBig})
-	check(t, f, []string{"--max-filesize", "100002", "http://public.test/big?n=100002&chunked=1"},
-		want{exitOK, strings.Repeat("b", maxShowBytes), "… truncated, 2 more bytes; use -o to save it all\n"})
+	limit := config.DefaultMaxStdoutBytes
+	big := "http://public.test/big?n=" + strconv.Itoa(limit+2) + "&chunked=1"
+	check(t, f, []string{"--max-filesize", strconv.Itoa(limit + 1), big}, want{exitFileSizeExceeded, "", tooBig})
+	check(t, f, []string{"--max-filesize", strconv.Itoa(limit + 2), big},
+		want{exitOK, strings.Repeat("b", limit), "… truncated, 2 more bytes; use -o to save it all\n"})
 
 	// -o: a Content-Length over the limit writes no file; a body without one
 	// stops at the limit and leaves what was written.

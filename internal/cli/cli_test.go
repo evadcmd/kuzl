@@ -173,7 +173,7 @@ func TestRunLogsNoArgsOnError(t *testing.T) {
 // kuzl has it: as curl, the binary has nothing but curl's command line.
 func TestRunPolicy(t *testing.T) {
 	code, stdout, stderr := run("kuzl", "policy")
-	if want := "# allow_hosts is empty: no host is allowed.\nallow_hosts: []\ndeny_hosts: []\ndeny_addrs: []\n"; code != exitOK || stdout != want || stderr != "" {
+	if want := "# allow_hosts is empty: no host is allowed.\nallow_hosts: []\ndeny_hosts: []\ndeny_addrs: []\nmax_stdout_bytes: 48000\n"; code != exitOK || stdout != want || stderr != "" {
 		t.Errorf("got (%d, %q, %q), want (%d, %q, \"\")", code, stdout, stderr, exitOK, want)
 	}
 	if code, _, _ := run("kuzl", "policy", "extra"); code != exitUsage {

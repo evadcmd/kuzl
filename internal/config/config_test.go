@@ -21,6 +21,7 @@ deny_addrs:
   - 8.8.4.4
   - 9.9.9.0/24
   - 2620:fe::/48
+max_stdout_bytes: 30000
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -34,6 +35,7 @@ deny_addrs:
   - 8.8.4.4
   - 9.9.9.0/24
   - 2620:fe::/48
+max_stdout_bytes: 30000
 `
 	if got := string(Format(r)); got != want {
 		t.Errorf("Format(Parse) =\n%s\nwant\n%s", got, want)
@@ -46,15 +48,15 @@ deny_addrs:
 }
 
 // Every key is optional: an empty file, or one with only comments, allows no
-// host.
+// host, and caps stdout at the default.
 func TestParseEmpty(t *testing.T) {
-	for _, doc := range []string{"", "# nothing\n", "{}", "---\n{}\n", "deny_hosts:\ndeny_addrs: null\n"} {
+	for _, doc := range []string{"", "# nothing\n", "{}", "---\n{}\n", "deny_hosts:\ndeny_addrs: null\nmax_stdout_bytes: ~\n"} {
 		r, err := Parse([]byte(doc))
-		if err != nil || len(r.AllowHosts)+len(r.DenyHosts)+len(r.DenyAddrs) != 0 {
-			t.Errorf("Parse(%q) = %+v, %v; want empty rules", doc, r, err)
+		if err != nil || len(r.AllowHosts)+len(r.DenyHosts)+len(r.DenyAddrs) != 0 || r.MaxStdoutBytes != DefaultMaxStdoutBytes {
+			t.Errorf("Parse(%q) = %+v, %v; want empty rules and the default cap", doc, r, err)
 		}
 	}
-	want := "# allow_hosts is empty: no host is allowed.\nallow_hosts: []\ndeny_hosts: []\ndeny_addrs: []\n"
+	want := "# allow_hosts is empty: no host is allowed.\nallow_hosts: []\ndeny_hosts: []\ndeny_addrs: []\nmax_stdout_bytes: 48000\n"
 	r, _ := Parse(nil)
 	if got := string(Format(r)); got != want {
 		t.Errorf("Format(empty) = %q, want %q", got, want)
@@ -110,6 +112,35 @@ func TestParseEntryErrors(t *testing.T) {
 	}
 }
 
+// max_stdout_bytes is a whole number of bytes, from 1 to 100 MiB; anything
+// else fails the file, with its line.
+func TestParseMaxStdoutBytes(t *testing.T) {
+	for doc, want := range map[string]int{
+		"max_stdout_bytes: 1\n":         1,
+		"max_stdout_bytes: 100000\n":    100000,
+		"max_stdout_bytes: 104857600\n": 104857600,
+	} {
+		if p, err := Parse([]byte(doc)); err != nil || p.MaxStdoutBytes != want {
+			t.Errorf("Parse(%q) = %+v, %v; want max_stdout_bytes %d", doc, p, err, want)
+		}
+	}
+	for doc, want := range map[string]string{
+		"max_stdout_bytes: 0\n":                    "line 1: max_stdout_bytes 0: want 1 to 104857600",
+		"deny_hosts: []\nmax_stdout_bytes: -1\n":   "line 2: max_stdout_bytes -1: want 1 to 104857600",
+		"max_stdout_bytes: 104857601\n":            "line 1: max_stdout_bytes 104857601: want 1 to 104857600",
+		"max_stdout_bytes: 99999999999999999999\n": "line 1: max_stdout_bytes should be a number of bytes, not !!float",
+		"max_stdout_bytes: \"48000\"\n":            "line 1: max_stdout_bytes should be a number of bytes, not !!str",
+		"max_stdout_bytes: 48k\n":                  "line 1: max_stdout_bytes should be a number of bytes, not !!str",
+		"max_stdout_bytes: 1.5\n":                  "line 1: max_stdout_bytes should be a number of bytes, not !!float",
+		"max_stdout_bytes: [1]\n":                  "line 1: max_stdout_bytes should be a number of bytes, not !!seq",
+	} {
+		_, err := Parse([]byte(doc))
+		if _, ok := errors.AsType[*EntryError](err); !ok || err.Error() != want {
+			t.Errorf("Parse(%q) = %v, want the *EntryError %q", doc, err, want)
+		}
+	}
+}
+
 // Empty or null, allow_hosts allows no host, as left out; "*" is every public
 // host.
 func TestParseAllowList(t *testing.T) {
@@ -128,7 +159,7 @@ func TestParseAllowList(t *testing.T) {
 	if err != nil || len(r.AllowHosts) != 1 || r.AllowHosts[0].String() != "*" {
 		t.Fatalf("Parse(*) = %+v, %v; want allow_hosts *", r, err)
 	}
-	want := "allow_hosts:\n  - '*'\ndeny_hosts: []\ndeny_addrs: []\n"
+	want := "allow_hosts:\n  - '*'\ndeny_hosts: []\ndeny_addrs: []\nmax_stdout_bytes: 48000\n"
 	if got := string(Format(r)); got != want {
 		t.Errorf("Format(*) = %q, want %q", got, want)
 	}
@@ -187,6 +218,10 @@ func TestBuiltin(t *testing.T) {
 	builtin = base64.StdEncoding.EncodeToString([]byte("deny_addrs:\n  - 1.0.0.0/24\n"))
 	if r, err := Builtin(); err != nil || len(r.DenyAddrs) != 1 || r.DenyAddrs[0].String() != "1.0.0.0/24" {
 		t.Errorf("Builtin() = %+v, %v; want deny_addrs 1.0.0.0/24", r, err)
+	}
+	builtin = base64.StdEncoding.EncodeToString([]byte("max_stdout_bytes: 30000\n"))
+	if r, err := Builtin(); err != nil || r.MaxStdoutBytes != 30000 {
+		t.Errorf("Builtin() = %+v, %v; want max_stdout_bytes 30000", r, err)
 	}
 	for in, want := range map[string]string{
 		"deny_addrs: [1.0.0.0/24]":                                 "not base64",

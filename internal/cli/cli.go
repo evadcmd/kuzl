@@ -46,6 +46,9 @@ type IO struct {
 	Client func(netguard.Options) (*http.Client, error)
 	// Getenv reads the environment, for KUZL_ROOT; nil is os.Getenv.
 	Getenv func(string) string
+	// MaxStdoutBytes caps what curl writes to stdout; 0 takes the built-in
+	// policy's max_stdout_bytes.
+	MaxStdoutBytes int
 }
 
 func (s IO) root() (*workspace.Root, error) {
@@ -60,11 +63,22 @@ func (s IO) client(o netguard.Options) (*http.Client, error) {
 	if s.Client != nil {
 		return s.Client(o)
 	}
-	r, err := config.Builtin()
+	p, err := config.Builtin()
 	if err != nil {
 		return nil, err
 	}
-	return netguard.NewPolicy(r).Client(o), nil
+	return netguard.NewPolicy(p.Rules).Client(o), nil
+}
+
+func (s IO) maxStdoutBytes() (int, error) {
+	if s.MaxStdoutBytes > 0 {
+		return s.MaxStdoutBytes, nil
+	}
+	p, err := config.Builtin()
+	if err != nil {
+		return 0, err
+	}
+	return p.MaxStdoutBytes, nil
 }
 
 // Run executes the command line args (args[0] included) and returns the exit
@@ -153,11 +167,11 @@ func newPolicyCmd(s IO) *cobra.Command {
 		Short: "Print the network policy built into this binary",
 		Args:  noArgs,
 		RunE: func(*cobra.Command, []string) error {
-			r, err := config.Builtin()
+			p, err := config.Builtin()
 			if err != nil {
 				return err
 			}
-			_, err = s.Out.Write(config.Format(r))
+			_, err = s.Out.Write(config.Format(p))
 			return err
 		},
 	}
