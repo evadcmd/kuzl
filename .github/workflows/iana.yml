@@ -1,0 +1,60 @@
+name: IANA
+
+# Checks netguard's non-public ranges against IANA's special-purpose
+# registries (#6): TestIANA, which go test skips elsewhere to stay offline.
+# A failure opens an issue, besides GitHub's failed-workflow email.
+#
+# GitHub disables a scheduled workflow after 60 days without activity in a
+# public repository, and emails when it does. Re-enable it in the Actions tab,
+# then run it once with "Run workflow".
+on:
+  schedule:
+    - cron: "17 3 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - id: check
+        # bash, not the default shell, so that pipefail keeps go test's status.
+        shell: bash
+        env:
+          KUZL_IANA_CHECK: "1"
+        run: go test -run '^TestIANA$' -count=1 -v ./internal/netguard 2>&1 | tee iana.log
+      - if: failure() && steps.check.outcome == 'failure'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="IANA registry check failed"
+          # The exact title: --search matches words, not the whole title.
+          # --limit: the default 30 could leave the tracking issue out.
+          open=$(gh issue list --state open --limit 1000 --json number,title \
+            --jq "[.[] | select(.title == \"$title\")][0].number // empty")
+          if [ -n "$open" ]; then
+            echo "Already tracked in #$open"
+            exit 0
+          fi
+          {
+            echo "The scheduled check against IANA's special-purpose registries failed: $RUN_URL"
+            echo
+            echo "A range the registry marks not globally reachable isn't refused by \`internal/netguard/addr.go\`, or the download failed. See #6."
+            echo
+            echo '```'
+            tail -n 50 iana.log
+            echo '```'
+          } > body.md
+          gh issue create --title "$title" --body-file body.md
