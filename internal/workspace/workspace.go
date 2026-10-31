@@ -92,16 +92,37 @@ func pathError(name string, err error) error {
 	return err
 }
 
-// WriteFile writes data to name, creating missing parent directories and
-// replacing the file if it exists. A symlink at name is refused rather than
-// followed.
+// Check reports whether name is inside the root, so that a command can refuse
+// a path before it does anything else. It doesn't look at the file itself:
+// Create does, when it opens it.
+func (r *Root) Check(name string) error {
+	_, err := r.rel(name)
+	return err
+}
+
+// WriteFile writes data to name, as Create does.
 func (r *Root) WriteFile(name string, data []byte) error {
-	rel, err := r.rel(name)
+	f, err := r.Create(name)
 	if err != nil {
 		return err
 	}
+	_, err = f.Write(data)
+	if err1 := f.Close(); err == nil {
+		err = err1
+	}
+	return err
+}
+
+// Create opens name for writing, creating missing parent directories and
+// emptying the file if it exists. A symlink at name is refused rather than
+// followed. The caller closes the file.
+func (r *Root) Create(name string) (*os.File, error) {
+	rel, err := r.rel(name)
+	if err != nil {
+		return nil, err
+	}
 	if err := r.root.MkdirAll(filepath.Dir(rel), 0o755); err != nil {
-		return pathError(name, err)
+		return nil, pathError(name, err)
 	}
 	info, err := r.root.Lstat(rel)
 	var f *os.File
@@ -110,31 +131,27 @@ func (r *Root) WriteFile(name string, data []byte) error {
 		// O_EXCL never follows a symlink, even one made since Lstat.
 		f, err = r.root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	case err != nil:
-		return pathError(name, err)
+		return nil, pathError(name, err)
 	case !info.Mode().IsRegular():
-		return fmt.Errorf("%s: not a regular file", name)
+		return nil, fmt.Errorf("%s: not a regular file", name)
 	default:
 		// Truncated only once it is known to be the file Lstat saw.
 		f, err = r.root.OpenFile(rel, os.O_WRONLY, 0)
 	}
 	if err != nil {
-		return pathError(name, err)
+		return nil, pathError(name, err)
 	}
 	if info != nil {
 		// OpenFile follows a symlink, so make sure it is still the file
 		// Lstat saw.
 		if opened, err := f.Stat(); err != nil || !os.SameFile(info, opened) {
 			_ = f.Close()
-			return fmt.Errorf("%s: changed while being opened", name)
+			return nil, fmt.Errorf("%s: changed while being opened", name)
 		}
 		if err := f.Truncate(0); err != nil {
 			_ = f.Close()
-			return err
+			return nil, err
 		}
 	}
-	_, err = f.Write(data)
-	if err1 := f.Close(); err == nil {
-		err = err1
-	}
-	return err
+	return f, nil
 }

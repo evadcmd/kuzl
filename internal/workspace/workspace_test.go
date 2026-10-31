@@ -118,6 +118,42 @@ func TestSymlinkedRootTakesBothSpellings(t *testing.T) {
 	wantErr(t, r.WriteFile(filepath.Join(base, "other.md"), []byte("x")), "outside "+link)
 }
 
+func TestCheck(t *testing.T) {
+	r, _, dir, secret := setup(t)
+	// Only the path counts: a file that doesn't exist yet is fine.
+	for _, name := range []string{"new/out.txt", filepath.Join(dir, "sub", "body.md")} {
+		if err := r.Check(name); err != nil {
+			t.Errorf("Check(%q) = %v, want ok", name, err)
+		}
+	}
+	for _, name := range []string{"../out.txt", secret, ""} {
+		wantErr(t, r.Check(name), "outside")
+	}
+}
+
+// Create streams into the file, which is emptied first, as WriteFile does.
+func TestCreate(t *testing.T) {
+	r, _, dir, secret := setup(t)
+	symlink(t, secret, filepath.Join(dir, "link.pem"))
+
+	f, err := r.Create("sub/body.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"a", "b"} {
+		if _, err := f.WriteString(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wantFile(t, filepath.Join(dir, "sub", "body.md"), "ab")
+	_, err = r.Create("link.pem")
+	wantErr(t, err, "not a regular file")
+	wantFile(t, secret, "key")
+}
+
 func TestWriteFile(t *testing.T) {
 	r, _, dir, secret := setup(t)
 	symlink(t, secret, filepath.Join(dir, "link.pem"))
