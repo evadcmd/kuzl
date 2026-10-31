@@ -96,7 +96,7 @@ var refusedFlags = []struct {
 var dataFlags = []struct {
 	name, short, usage string
 }{
-	{"data", "d", "With -G, add `data` to the query string as is"},
+	{"data", "d", "With -G, add `data` to the query string, already encoded"},
 	{"data-ascii", "", "With -G, add `data` as -d does"},
 	{"data-binary", "", "With -G, add `data` as -d does"},
 	{"data-raw", "", "With -G, add `data` as -d does, with @ not special"},

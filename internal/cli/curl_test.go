@@ -258,6 +258,9 @@ func TestCurlRefusesFlags(t *testing.T) {
 		{[]string{"--data-urlencode", "q=x"}, "--data-urlencode without -G is not supported: kuzl only sends GET and HEAD; -G puts the data in the query string"},
 		{[]string{"--json", "{}"}, "--json is not supported: kuzl only sends GET and HEAD"},
 		{[]string{"-F", "f=@x"}, "-F/--form is not supported: kuzl only sends GET and HEAD"},
+		// -G takes only the data flags: --json and -F stay refused.
+		{[]string{"-G", "--json", "{}"}, "--json is not supported: kuzl only sends GET and HEAD"},
+		{[]string{"-G", "-F", "f=x"}, "-F/--form is not supported: kuzl only sends GET and HEAD"},
 		{[]string{"-T", "x"}, "-T/--upload-file is not supported: kuzl only sends GET and HEAD"},
 		{[]string{"-K", "x"}, "-K/--config is not supported: kuzl reads no config file"},
 		{[]string{"-u", "a:b"}, `-u/--user is not supported: set the header instead, as in -H "Authorization: Basic ..."`},

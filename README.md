@@ -27,20 +27,21 @@ The flags are curl's: `-s`, `-S`, `-f`, `--fail-with-body`, `-L`,
 `--max-redirs`, `-I`, `-i`, `-X GET|HEAD`, `-H`, `-A`, `-e`, `-m`,
 `--connect-timeout`, `--compressed`, `-o`, `-O`, `--create-dirs`,
 `--max-filesize`, `-r`, `-w`, and with `-G`, `-d`, `--data-ascii`,
-`--data-binary`, `--data-raw` and `--data-urlencode`. Errors are curl's `curl: (N) message` with
-curl's exit code: 3 for a malformed URL, 6 when the host doesn't resolve, 7
-when it can't be reached, 22 for `-f` on a status of 400 or more, 23 when the
-output can't be written, 28 on a timeout, 47 past `--max-redirs` and 63 past
-`--max-filesize`.
+`--data-binary`, `--data-raw` and `--data-urlencode`. Errors are curl's
+`curl: (N) message` with curl's exit code: 3 for a malformed URL, 6 when the
+host doesn't resolve, 7 when it can't be reached, 22 for `-f` on a status of
+400 or more, 23 when the output can't be written, 28 on a timeout, 47 past
+`--max-redirs` and 63 past `--max-filesize`.
 
 Where kuzl differs:
 
 - Anything kuzl doesn't do exits 2 with the reason on one line, before
   anything is sent, even under `-s`: flags that send data (`--json`, `-F`,
   `-T`, and `-d` without `-G`), read or write local files (`-K`, `-b`, `-c`,
-  `--netrc`, `-H @file`, `-d @file`) or go around the policy (`-x`, `-k`, `--unix-socket`, `--resolve`,
-  `--connect-to`, `--location-trusted`), `-u`, a `Host` header, a method
-  other than GET or HEAD, and a request the policy refuses.
+  `--netrc`, `-H @file`, `-d @file`) or go around the policy (`-x`, `-k`,
+  `--unix-socket`, `--resolve`, `--connect-to`, `--location-trusted`), `-u`,
+  a `Host` header, a method other than GET or HEAD, and a request the policy
+  refuses.
 - Stdout gets at most 100000 bytes, headers included, cut on a character
   boundary, with a note on stderr of how much was left out. A body that isn't
   UTF-8 text is not written to stdout and exits 23. The note points at `-o`.
@@ -62,8 +63,8 @@ Where kuzl differs:
   does. A value is never read from a file: `-d @file` is refused, and so is
   `--data-urlencode` with an `@` but no `=` (`@file`, `name@file`);
   `--data-raw` sends `@` as is. `--data-urlencode` encodes as curl does, a
-  space as `%20`. `-d` is sent as given, except that bytes a query can't hold
-  (a space, `#`, control characters, non-ASCII) are percent-encoded.
+  space as `%20`. `-d` is sent as given, except that bytes a query can't hold,
+  such as a space, `#`, control characters and non-ASCII, are percent-encoded.
 - One URL per call. `-i` and `-I` print the headers sorted, in Go's
   canonical case, not in the server's order.
 - The default `User-Agent` is `kuzl/<version>`; `-A` sets another.
