@@ -38,7 +38,16 @@ var fakeHosts = map[string]string{
 	"down.test":       "1.1.1.1",
 }
 
-func (f *fakeNet) LookupNetIP(_ context.Context, _, host string) ([]netip.Addr, error) {
+func (f *fakeNet) LookupNetIP(ctx context.Context, _, host string) ([]netip.Addr, error) {
+	// slowdns.test never answers, as a hung resolver doesn't.
+	if host == "slowdns.test" {
+		select {
+		case <-ctx.Done():
+			return nil, &net.DNSError{Err: "i/o timeout", Name: host, IsTimeout: true}
+		case <-time.After(5 * time.Second):
+			return nil, errors.New("slowdns.test: no deadline")
+		}
+	}
 	ip, ok := fakeHosts[host]
 	if !ok {
 		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
@@ -60,7 +69,8 @@ func (f *fakeNet) dial(ctx context.Context, network, address string) (net.Conn, 
 //   - /status?code=N answers N with a body;
 //   - /big?n=N sends N bytes of b, with ?s=S of them first and chunked=1
 //     without a Content-Length;
-//   - /binary, /latin1 and /gzip send what they say;
+//   - /binary, /latin1 and /gzip send what they say, /binary with status
+//     ?code=N if given;
 //   - /slow waits for the client to give up;
 //   - anything else says hello.
 func newFakeNet(t *testing.T) *fakeNet {
@@ -94,6 +104,9 @@ func newFakeNet(t *testing.T) *fakeNet {
 			_, _ = w.Write(bytes.Repeat([]byte("b"), n))
 		case "/binary":
 			w.Header().Set("Content-Type", "image/png")
+			if code, _ := strconv.Atoi(q.Get("code")); code != 0 {
+				w.WriteHeader(code)
+			}
 			_, _ = w.Write([]byte("\x89PNG\r\n\x1a\n\x00\x00"))
 		case "/latin1":
 			_, _ = w.Write([]byte("caf\xe9"))
@@ -161,6 +174,9 @@ func TestCurlGet(t *testing.T) {
 	// As curl does, a URL without a scheme is http, and the fragment isn't
 	// sent.
 	check(t, f, []string{"public.test/#frag"}, want{exitOK, "hello from public.test", ""})
+	// Only a scheme at the start counts, not "://" in the query.
+	check(t, f, []string{"public.test/?next=https://x.test/"}, want{exitOK, "hello from public.test", ""})
+	check(t, f, []string{"public.test:80/x"}, want{exitOK, "hello from public.test:80", ""})
 	// Go's client asks for gzip and decompresses it.
 	check(t, f, []string{"--compressed", "http://public.test/gzip"}, want{exitOK, "unzipped", ""})
 }
@@ -325,6 +341,8 @@ func TestCurlFail(t *testing.T) {
 	check(t, f, []string{"-sSf", url}, want{exitHTTPReturned, "", "curl: (22) The requested URL returned error: 404\n"})
 	check(t, f, []string{"--fail-with-body", url}, want{exitHTTPReturned, "status body", "curl: (22) The requested URL returned error: 404\n"})
 	check(t, f, []string{"-f", "http://public.test/status?code=399"}, want{exitOK, "status body", ""})
+	// The failed request wins over a binary body, which isn't written.
+	check(t, f, []string{"--fail-with-body", "http://public.test/binary?code=404"}, want{exitHTTPReturned, "", "curl: (22) The requested URL returned error: 404\n"})
 }
 
 // A request the policy refuses exits 2 with the reason, even under -s.
@@ -355,6 +373,11 @@ func TestCurlNetworkErrors(t *testing.T) {
 	code, stdout, stderr := f.curl(t, "-m", "0.2", "http://public.test/slow")
 	if code != exitTimeout || stdout != "" || !strings.HasPrefix(stderr, "curl: (28) Operation timed out after ") {
 		t.Errorf("-m: got (%d, %q, %q), want exit 28", code, stdout, stderr)
+	}
+	// --connect-timeout covers the name lookup too.
+	code, stdout, stderr = f.curl(t, "--connect-timeout", "0.2", "http://slowdns.test/")
+	if code != exitTimeout || stdout != "" || !strings.HasPrefix(stderr, "curl: (28) Connection timed out after ") {
+		t.Errorf("--connect-timeout: got (%d, %q, %q), want exit 28", code, stdout, stderr)
 	}
 }
 

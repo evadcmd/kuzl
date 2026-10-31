@@ -25,7 +25,11 @@ type fakeNet struct {
 	dialed []string
 }
 
-func (f *fakeNet) LookupNetIP(_ context.Context, _, host string) ([]netip.Addr, error) {
+func (f *fakeNet) LookupNetIP(ctx context.Context, _, host string) ([]netip.Addr, error) {
+	// slowdns.test never answers, as a hung resolver doesn't.
+	if host == "slowdns.test" {
+		return nil, hang(ctx, &net.DNSError{Err: "i/o timeout", Name: host, IsTimeout: true})
+	}
 	// As DNS does, ignoring case and a trailing dot.
 	addrs, ok := f.hosts[strings.TrimSuffix(strings.ToLower(host), ".")]
 	if !ok {
@@ -45,8 +49,23 @@ func (f *fakeNet) dial(ctx context.Context, network, address string) (net.Conn, 
 	if strings.HasPrefix(address, "1.1.1.1:") {
 		return nil, &net.OpError{Op: "dial", Net: network, Err: errors.New("connection refused")}
 	}
+	// 2.2.2.x drops the SYN, so the dial waits until ctx gives up.
+	if strings.HasPrefix(address, "2.2.2.") {
+		return nil, &net.OpError{Op: "dial", Net: network, Err: hang(ctx, context.DeadlineExceeded)}
+	}
 	var d net.Dialer
 	return d.DialContext(ctx, network, f.server)
+}
+
+// hang waits for ctx to end and returns err, or gives up after a while so
+// that a test without a deadline fails instead of hanging.
+func hang(ctx context.Context, err error) error {
+	select {
+	case <-ctx.Done():
+		return err
+	case <-time.After(5 * time.Second):
+		return errors.New("hang: no deadline")
+	}
 }
 
 func (f *fakeNet) dials() []string {
@@ -92,6 +111,7 @@ func newFakeNet(t *testing.T) *fakeNet {
 			"banned.test":     {"1.0.0.1"},
 			"banned64.test":   {"64:ff9b::100:1"}, // 1.0.0.1 through NAT64
 			"partbanned.test": {"1.0.0.1", "8.8.8.8"},
+			"blackhole.test":  {"2.2.2.2", "2.2.2.3"},
 		},
 	}
 }
@@ -168,6 +188,31 @@ func TestClientReportsNetworkErrors(t *testing.T) {
 		if _, ok := errors.AsType[*net.OpError](err); !ok || isRefused(err) {
 			t.Errorf("%s: err = %v, want a *net.OpError", host, err)
 		}
+	}
+}
+
+// ConnectTimeout is one deadline over the lookup and every dial, as curl's
+// --connect-timeout is, not a fresh one for each address.
+func TestClientConnectTimeout(t *testing.T) {
+	const timeout = 100 * time.Millisecond
+	for _, host := range []string{"slowdns.test", "blackhole.test"} {
+		t.Run(host, func(t *testing.T) {
+			f := newFakeNet(t)
+			start := time.Now()
+			_, _, err := get(f.client(t, Options{ConnectTimeout: timeout}), "http://"+host+"/")
+			if ne, ok := errors.AsType[net.Error](err); !ok || !ne.Timeout() {
+				t.Fatalf("err = %v, want a timeout", err)
+			}
+			if elapsed := time.Since(start); elapsed > 2*time.Second {
+				t.Errorf("gave up after %v, want about %v", elapsed, timeout)
+			}
+			// The second address isn't tried: the deadline is already spent.
+			if host == "blackhole.test" {
+				if got := f.dials(); strings.Join(got, ",") != "2.2.2.2:80" {
+					t.Errorf("dialed %v, want only 2.2.2.2:80", got)
+				}
+			}
+		})
 	}
 }
 

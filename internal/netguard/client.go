@@ -22,7 +22,9 @@ type Options struct {
 	// MaxRedirects is how many redirects may be followed (curl's
 	// --max-redirs); a negative number means no limit, as curl's -1 does.
 	MaxRedirects int
-	// ConnectTimeout bounds each connection attempt; zero means no bound.
+	// ConnectTimeout bounds the whole connect phase, as curl's
+	// --connect-timeout does: the name lookup and every address tried, all
+	// together. Zero means no bound.
 	ConnectTimeout time.Duration
 }
 
@@ -52,7 +54,7 @@ type DialFunc func(ctx context.Context, network, address string) (net.Conn, erro
 // Errors from its Do wrap a *RefusedError for a refused request, a
 // *TooManyRedirectsError, or what net reports, such as a *net.DNSError.
 func (p *Policy) Client(o Options) *http.Client {
-	d := &net.Dialer{Timeout: o.ConnectTimeout, Control: p.control}
+	d := &net.Dialer{Control: p.control}
 	return p.client(o, net.DefaultResolver, d.DialContext)
 }
 
@@ -68,7 +70,7 @@ func (p *Policy) ClientOver(o Options, r Resolver, dial DialFunc) *http.Client {
 func (p *Policy) client(o Options, r Resolver, dial DialFunc) *http.Client {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.Proxy = nil
-	t.DialContext = (&dialer{policy: p, resolve: r, dial: dial}).DialContext
+	t.DialContext = (&dialer{policy: p, resolve: r, dial: dial, timeout: o.ConnectTimeout}).DialContext
 	t.DialTLSContext = nil
 	return &http.Client{
 		Transport:     &checkedTransport{policy: p, next: t},
@@ -146,9 +148,17 @@ type dialer struct {
 	policy  *Policy
 	resolve Resolver
 	dial    DialFunc
+	// timeout is Options.ConnectTimeout, one deadline over the lookup and
+	// the dials; zero means none.
+	timeout time.Duration
 }
 
 func (d *dialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	if d.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, d.timeout)
+		defer cancel()
+	}
 	host, portStr, err := net.SplitHostPort(address)
 	if err != nil {
 		return nil, err

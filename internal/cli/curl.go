@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -30,6 +31,9 @@ const (
 	// defaultMaxRedirs is kuzl's --max-redirs; curl's is 50.
 	defaultMaxRedirs = 10
 )
+
+// hasScheme matches a URL that starts with a scheme (RFC 3986) and "://".
+var hasScheme = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://`)
 
 // curl's exit codes for the failures kuzl reports.
 const (
@@ -207,8 +211,9 @@ func (f *curlFlags) newRequest(c *cobra.Command, rawURL string) (*http.Request, 
 		return nil, usage("a timeout can't be negative")
 	}
 
-	// curl takes a URL without a scheme as http.
-	if !strings.Contains(rawURL, "://") {
+	// curl takes a URL without a scheme as http. Only a scheme at the start
+	// counts: "://" in a query (?next=https://…) isn't one.
+	if !hasScheme.MatchString(rawURL) {
 		rawURL = "http://" + rawURL
 	}
 	u, err := url.Parse(rawURL)
@@ -367,6 +372,10 @@ func (f *curlFlags) fetch(ctx context.Context, s IO, req *http.Request, rec *rec
 	if shown := data[min(len(head), n):n]; bytes.IndexByte(shown, 0) >= 0 || !utf8.Valid(shown) {
 		if _, err := s.Out.Write(data[:min(len(head), n)]); err != nil {
 			return err
+		}
+		// The failed request matters more to the caller than the binary body.
+		if failed {
+			return httpErr
 		}
 		what := "binary output"
 		if ct := resp.Header.Get("Content-Type"); ct != "" {
