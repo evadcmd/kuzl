@@ -282,9 +282,10 @@ func TestClientDropsCredentialsOffOrigin(t *testing.T) {
 			}
 		})
 	}
-	// Once dropped, they stay dropped, even back on the first origin. curl
-	// would send them again there; Go's client doesn't (CVE-2024-45336),
-	// which only ever sends less.
+	// Back on the first origin, they stay dropped after a cross-domain hop:
+	// Go's client keeps that drop for the rest of the chain (CVE-2024-45336).
+	// After a subdomain hop, where only kuzl dropped them, they are sent
+	// again there, as curl does (#8).
 	f := newFakeNet(t)
 	body, _, err := get(f.client(t, follow(10)), "http://public.test/to?u=http://other.test/to%3Fu=http://public.test/headers", headers...)
 	if want := "public.test auth= cookie= trace=t1"; err != nil || body != want {
