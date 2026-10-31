@@ -261,6 +261,11 @@ func (f *curlFlags) newRequest(c *cobra.Command, rawURL string) (*http.Request, 
 	if f.maxTime < 0 || f.connTimeout < 0 {
 		return nil, usage("a timeout can't be negative")
 	}
+	// An empty -o, such as an unset shell variable, would otherwise look like
+	// no -o and send the body to stdout.
+	if c.Flags().Changed("output") && f.output == "" {
+		return nil, usage(`-o "": want a file name, or - for stdout`)
+	}
 	if f.output != "" && f.remoteName {
 		return nil, usage("use -o or -O, not both")
 	}
@@ -500,7 +505,13 @@ func (f *curlFlags) fetch(ctx context.Context, s IO, req *http.Request, root *wo
 		if _, ok := errors.AsType[*refusalError](err); ok {
 			return err
 		}
-		return f.writeOutAfter(s, req, nil, 0, err)
+		// A hop may have answered before the failure, as past --max-redirs;
+		// -w reports the last response, as curl does.
+		var last *http.Response
+		if n := len(hops.hops); n > 0 {
+			last = hops.hops[n-1]
+		}
+		return f.writeOutAfter(s, req, last, 0, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	rec.add("status", resp.StatusCode)

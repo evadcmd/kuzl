@@ -537,6 +537,7 @@ func TestCurlOutputRefusals(t *testing.T) {
 	check(t, f, []string{"-O", "http://public.test/a/.."}, want{exitUsage, "", "curl: -O ..: outside " + f.root + "\n"})
 	check(t, f, []string{"-O", "http://public.test/"}, want{exitWriteError, "", "curl: (23) Remote file name has no length\n"})
 	check(t, f, []string{"-o", "x", "-O", "http://public.test/x"}, want{exitUsage, "", "curl: use -o or -O, not both\n" + hint})
+	check(t, f, []string{"-o", "", "http://public.test/"}, want{exitUsage, "", "curl: -o \"\": want a file name, or - for stdout\n" + hint})
 	if n := f.requests.Load(); n != 0 {
 		t.Errorf("%d requests sent, want none", n)
 	}
@@ -619,6 +620,9 @@ func TestCurlWriteOut(t *testing.T) {
 	// refusal, where nothing was sent.
 	check(t, f, []string{"-sf", "-w", "%{http_code}", "http://public.test/status?code=404"}, want{exitHTTPReturned, "404", ""})
 	check(t, f, []string{"-s", "-w", "%{http_code}", "http://nxdomain.test/"}, want{exitCouldntResolve, "000", ""})
+	// A transfer that fails after a response reports that response.
+	check(t, f, []string{"-sL", "--max-redirs", "0", "-w", "%{http_code} %{url_effective}", "http://public.test/to?u=http://sub.public.test/x"},
+		want{exitTooManyRedirects, "302 http://public.test/to?u=http://sub.public.test/x", ""})
 	check(t, f, []string{"-s", "-w", "%{http_code}", "http://denied.test/"}, want{exitUsage, "", "curl: host denied.test is in deny_hosts\n"})
 
 	hint := "Run 'curl --help' for usage.\n"
