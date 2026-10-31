@@ -83,3 +83,11 @@ go vet ./...
 go test -race ./...
 golangci-lint run
 ```
+
+`go test` stays offline. The check of the non-public ranges against IANA's
+special-purpose registries downloads them, so it runs only when asked, as the
+monthly [IANA workflow](.github/workflows/iana.yml) does:
+
+```sh
+KUZL_IANA_CHECK=1 go test -run '^TestIANA$' ./internal/netguard
+```
