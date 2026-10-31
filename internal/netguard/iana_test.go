@@ -162,7 +162,7 @@ func fetchRegistry(ctx context.Context, url string) ([]ianaRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("status %s", resp.Status)
 	}
