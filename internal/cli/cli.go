@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"path/filepath"
 	"time"
 
 	"github.com/evadcmd/kuzl/internal/config"
+	"github.com/evadcmd/kuzl/internal/netguard"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -36,6 +38,21 @@ type IO struct {
 	// It must not write to Out or ErrOut, which only carry what curl would
 	// print.
 	Log *slog.Logger
+	// Client builds the client curl sends its request with; nil builds it
+	// from the policy built into the binary. Tests point it at an httptest
+	// server.
+	Client func(netguard.Options) (*http.Client, error)
+}
+
+func (s IO) client(o netguard.Options) (*http.Client, error) {
+	if s.Client != nil {
+		return s.Client(o)
+	}
+	r, err := config.Builtin()
+	if err != nil {
+		return nil, err
+	}
+	return netguard.NewPolicy(r).Client(o), nil
 }
 
 // Run executes the command line args (args[0] included) and returns the exit
@@ -45,6 +62,7 @@ type IO struct {
 // no positional args or flag values: those can be URLs with tokens in their
 // query, or headers. Nor does it carry the error's message, which cobra and
 // pflag write with the offending arg in it; the record has the error's kind.
+// curl adds the host, the method, the status and the byte count.
 func Run(args []string, s IO) int {
 	log := s.Log
 	if log == nil {
@@ -57,22 +75,30 @@ func Run(args []string, s IO) int {
 	if name != "curl" && len(args) > 1 && args[1] == "curl" {
 		name, args = args[1], args[1:]
 	}
-	cmd := newCommand(name, s)
+	rec := &record{}
+	cmd := newCommand(name, s, rec)
 	cmd.SetArgs(args[1:])
 	start := time.Now()
 	ran, err := cmd.ExecuteC()
-	attrs := []any{
+	attrs := append([]any{
 		"name", invokedAs,
 		"command", ran.CommandPath(),
 		"flags", setFlags(ran),
 		"duration_ms", time.Since(start).Milliseconds(),
-	}
+	}, rec.attrs...)
 	if err != nil {
 		code, kind := exitError, "error"
-		_, _ = fmt.Fprintf(s.ErrOut, "%s: %v\n", name, err)
+		quiet, hint := false, ""
 		if ue, ok := errors.AsType[*usageError](err); ok {
 			code, kind = exitUsage, "usage"
-			_, _ = fmt.Fprintf(s.ErrOut, "Run '%s --help' for usage.\n", ue.cmdPath)
+			hint = fmt.Sprintf("Run '%s --help' for usage.\n", ue.cmdPath)
+		} else if _, ok := errors.AsType[*refusalError](err); ok {
+			code, kind = exitUsage, "refused"
+		} else if ce, ok := errors.AsType[*curlError](err); ok {
+			code, kind, quiet = ce.code, "curl", ce.quiet
+		}
+		if !quiet {
+			_, _ = fmt.Fprintf(s.ErrOut, "%s: %v\n%s", name, err, hint)
 		}
 		log.Error("run", append(attrs, "exit_code", code, "error_kind", kind)...)
 		return code
@@ -88,13 +114,20 @@ func setFlags(cmd *cobra.Command) []string {
 	return names
 }
 
-func newCommand(name string, s IO) *cobra.Command {
+// record collects what a command adds to the run's log record.
+type record struct {
+	attrs []any
+}
+
+func (r *record) add(attrs ...any) { r.attrs = append(r.attrs, attrs...) }
+
+func newCommand(name string, s IO, rec *record) *cobra.Command {
 	switch name {
 	case "curl":
-		return newCurlCmd(s)
+		return newCurlCmd(s, rec)
 	default:
 		cmd := newRoot("kuzl", "A read-only curl for agents", s)
-		cmd.AddCommand(newCurlCmd(s), newPolicyCmd(s))
+		cmd.AddCommand(newCurlCmd(s, rec), newPolicyCmd(s))
 		return cmd
 	}
 }
@@ -116,14 +149,6 @@ func newPolicyCmd(s IO) *cobra.Command {
 			return err
 		},
 	}
-}
-
-func newCurlCmd(s IO) *cobra.Command {
-	cmd := newRoot("curl", "Fetch a URL with GET or HEAD", s)
-	// curl's version flag is -V; cobra's default would take -v, which is
-	// curl's --verbose. cobra uses a version flag that is already defined.
-	cmd.Flags().BoolP("version", "V", false, "version for curl")
-	return cmd
 }
 
 // newRoot returns a top-level command with the settings every tree shares.
@@ -179,3 +204,25 @@ type usageError struct {
 
 func (e *usageError) Error() string { return e.err.Error() }
 func (e *usageError) Unwrap() error { return e.err }
+
+// refusalError is something kuzl doesn't do, such as a flag that sends data
+// or a host the policy refuses. It exits 2 with its reason on one line, even
+// under -s: the caller needs the reason, and real curl has none to give.
+type refusalError struct {
+	err error
+}
+
+func (e *refusalError) Error() string { return e.err.Error() }
+func (e *refusalError) Unwrap() error { return e.err }
+
+// curlError is a failed transfer, printed as curl's "(N) message" and exiting
+// N, curl's code for it. quiet drops the message, as curl's -s without -S
+// does.
+type curlError struct {
+	code  int
+	err   error
+	quiet bool
+}
+
+func (e *curlError) Error() string { return fmt.Sprintf("(%d) %v", e.code, e.err) }
+func (e *curlError) Unwrap() error { return e.err }

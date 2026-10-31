@@ -22,7 +22,9 @@ type Options struct {
 	// MaxRedirects is how many redirects may be followed (curl's
 	// --max-redirs); a negative number means no limit, as curl's -1 does.
 	MaxRedirects int
-	// ConnectTimeout bounds each connection attempt; zero means no bound.
+	// ConnectTimeout bounds the whole connect phase, as curl's
+	// --connect-timeout does: the name lookup and every address tried, all
+	// together. Zero means no bound.
 	ConnectTimeout time.Duration
 }
 
@@ -35,14 +37,14 @@ func (e *TooManyRedirectsError) Error() string {
 	return fmt.Sprintf("maximum (%d) redirects followed", e.Max)
 }
 
-// resolver is the part of *net.Resolver the dialer uses, so that tests can
+// Resolver is the part of *net.Resolver the dialer uses, so that tests can
 // make names resolve to public addresses.
-type resolver interface {
+type Resolver interface {
 	LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error)
 }
 
-// dialFunc dials an address that is already an IP and port.
-type dialFunc func(ctx context.Context, network, address string) (net.Conn, error)
+// DialFunc dials an address that is already an IP and port.
+type DialFunc func(ctx context.Context, network, address string) (net.Conn, error)
 
 // Client returns an http.Client that only sends requests p allows: every
 // request, redirects included, is checked with CheckURL before it is sent,
@@ -52,14 +54,23 @@ type dialFunc func(ctx context.Context, network, address string) (net.Conn, erro
 // Errors from its Do wrap a *RefusedError for a refused request, a
 // *TooManyRedirectsError, or what net reports, such as a *net.DNSError.
 func (p *Policy) Client(o Options) *http.Client {
-	d := &net.Dialer{Timeout: o.ConnectTimeout, Control: p.control}
+	d := &net.Dialer{Control: p.control}
 	return p.client(o, net.DefaultResolver, d.DialContext)
 }
 
-func (p *Policy) client(o Options, r resolver, dial dialFunc) *http.Client {
+// ClientOver is Client with r and dial in place of DNS and the network, for
+// tests outside this package: they reach an httptest server, which is on
+// loopback, under public names. Every check still runs on what r returns, and
+// dial is only asked for addresses the policy allows; only the last check on
+// the socket (net.Dialer's Control) is left to dial.
+func (p *Policy) ClientOver(o Options, r Resolver, dial DialFunc) *http.Client {
+	return p.client(o, r, dial)
+}
+
+func (p *Policy) client(o Options, r Resolver, dial DialFunc) *http.Client {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.Proxy = nil
-	t.DialContext = (&dialer{policy: p, resolve: r, dial: dial}).DialContext
+	t.DialContext = (&dialer{policy: p, resolve: r, dial: dial, timeout: o.ConnectTimeout}).DialContext
 	t.DialTLSContext = nil
 	return &http.Client{
 		Transport:     &checkedTransport{policy: p, next: t},
@@ -135,11 +146,19 @@ func port(u *url.URL) string {
 // to and a second lookup can't return another (DNS rebinding).
 type dialer struct {
 	policy  *Policy
-	resolve resolver
-	dial    dialFunc
+	resolve Resolver
+	dial    DialFunc
+	// timeout is Options.ConnectTimeout, one deadline over the lookup and
+	// the dials; zero means none.
+	timeout time.Duration
 }
 
 func (d *dialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	if d.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, d.timeout)
+		defer cancel()
+	}
 	host, portStr, err := net.SplitHostPort(address)
 	if err != nil {
 		return nil, err
