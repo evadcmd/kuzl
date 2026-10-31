@@ -294,7 +294,7 @@ func validHeaderName(s string) bool {
 		return false
 	}
 	for _, c := range []byte(s) {
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0) {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && strings.IndexByte("!#$%&'*+-.^_`|~", c) < 0 {
 			return false
 		}
 	}
@@ -405,13 +405,13 @@ func countRest(resp *http.Response, read int64) (n int64, exact bool, err error)
 	return min(n, maxCountBytes), n <= maxCountBytes, err
 }
 
-// capAt returns how much of data to show: all of it, or up to max bytes, cut
+// capAt returns how much of data to show: all of it, or up to limit bytes, cut
 // at a character boundary. A rune is at most utf8.UTFMax bytes, so it backs
-// off at most that far; data that isn't UTF-8 is cut at max.
-func capAt(data []byte, max int) int {
+// off at most that far; data that isn't UTF-8 is cut at limit.
+func capAt(data []byte, limit int) int {
 	n := len(data)
-	if n > max {
-		n = max
+	if n > limit {
+		n = limit
 		for i := 0; i < utf8.UTFMax-1 && n > 0 && !utf8.RuneStart(data[n]); i++ {
 			n--
 		}

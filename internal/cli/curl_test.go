@@ -78,7 +78,7 @@ func newFakeNet(t *testing.T) *fakeNet {
 					_, _ = fmt.Fprintf(w, "%s=%q\n", h, v) //nolint:gosec // G705: a plain-text echo for the test.
 				}
 			}
-			_, _ = fmt.Fprintf(w, "method=%s\n", r.Method)
+			_, _ = fmt.Fprintf(w, "method=%s\n", r.Method) //nolint:gosec // G705: a plain-text echo for the test.
 		case "/status":
 			code, _ := strconv.Atoi(q.Get("code"))
 			w.WriteHeader(code)
