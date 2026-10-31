@@ -230,8 +230,9 @@ func decode(encoded string) (Policy, error) {
 	return p, nil
 }
 
-// Format writes p as a policy file, in normalized form: Parse(Format(p))
-// returns p.
+// Format writes p as a policy file, in normalized form: for a p that Parse
+// returned, Parse(Format(p)) returns p. (Not for any p: the zero Policy's
+// max_stdout_bytes 0 doesn't parse.)
 func Format(p Policy) []byte {
 	r := p.Rules
 	var out struct {
@@ -242,11 +243,11 @@ func Format(p Policy) []byte {
 	}
 	out.AllowHosts, out.DenyHosts, out.DenyAddrs = []string{}, []string{}, []string{}
 	out.MaxStdoutBytes = p.MaxStdoutBytes
-	for _, p := range r.AllowHosts {
-		out.AllowHosts = append(out.AllowHosts, p.String())
+	for _, h := range r.AllowHosts {
+		out.AllowHosts = append(out.AllowHosts, h.String())
 	}
-	for _, p := range r.DenyHosts {
-		out.DenyHosts = append(out.DenyHosts, p.String())
+	for _, h := range r.DenyHosts {
+		out.DenyHosts = append(out.DenyHosts, h.String())
 	}
 	for _, a := range r.DenyAddrs {
 		if a.IsSingleIP() {
