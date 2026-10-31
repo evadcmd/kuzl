@@ -27,6 +27,12 @@ allow_hosts:
   - static.crates.io
   - registry.npmjs.org
   - pkg.go.dev
+#
+# rustup-init, the Rust installer, so that an agent fetches it with curl as
+# it does anything else. The toolchain rustup-init then downloads from the
+# same host doesn't go through kuzl: the sandbox's own proxy has to allow it
+# too (evadcmd/taruza#221).
+  - static.rust-lang.org
 
 # Hosts requests may not go to, even if allow_hosts matches them.
 #
