@@ -615,7 +615,10 @@ func TestCurlWriteOut(t *testing.T) {
 	// The size is the body's, and the URL the last hop's.
 	check(t, f, []string{"-L", "-o", "out.txt", "-w", `%{size_download}\t%{url_effective}`, "http://public.test/to?u=http://sub.public.test/x"},
 		want{exitOK, "26\thttp://sub.public.test/x", ""})
-	check(t, f, []string{"-w", `100%% %{http_code}\\`, "-o", "out.txt", "http://public.test/"}, want{exitOK, `100% 200\`, ""})
+	check(t, f, []string{"-w", `100%% %{http_code}`, "-o", "out.txt", "http://public.test/"}, want{exitOK, `100% 200`, ""})
+	// As in curl, only \n, \r and \t are escapes: \\, \x and a \ at the end
+	// are written as they are.
+	check(t, f, []string{"-w", `\\ \x \`, "-o", "out.txt", "http://public.test/"}, want{exitOK, `\\ \x \`, ""})
 	// It comes after a failed transfer too, as curl's does, but not after a
 	// refusal, where nothing was sent.
 	check(t, f, []string{"-sf", "-w", "%{http_code}", "http://public.test/status?code=404"}, want{exitHTTPReturned, "404", ""})

@@ -426,8 +426,9 @@ func parseSize(s string) (int64, bool) {
 }
 
 // expandWriteOut expands an -w format as curl does: %{name} is a variable from
-// vars, %% is %, and \n, \r, \t and \\ are escapes. A variable kuzl doesn't
-// know is an error, so newRequest checks the format with nil vars.
+// vars, %% is %, and \n, \r and \t are escapes. Any other backslash is
+// written as is, \\ included. A variable kuzl doesn't know is an error, so
+// newRequest checks the format with nil vars.
 func expandWriteOut(format string, vars map[string]string) (string, error) {
 	var b strings.Builder
 	for i := 0; i < len(format); i++ {
@@ -447,8 +448,8 @@ func expandWriteOut(format string, vars map[string]string) (string, error) {
 			}
 			b.WriteString(vars[name])
 			i += end
-		case c == '\\' && i+1 < len(format) && strings.IndexByte(`nrt\`, format[i+1]) >= 0:
-			b.WriteByte(map[byte]byte{'n': '\n', 'r': '\r', 't': '\t', '\\': '\\'}[format[i+1]])
+		case c == '\\' && i+1 < len(format) && strings.IndexByte("nrt", format[i+1]) >= 0:
+			b.WriteByte(map[byte]byte{'n': '\n', 'r': '\r', 't': '\t'}[format[i+1]])
 			i++
 		default:
 			b.WriteByte(c)
