@@ -42,8 +42,9 @@ Where kuzl differs:
   `--unix-socket`, `--resolve`, `--connect-to`, `--location-trusted`), `-u`,
   a `Host` header, a method other than GET or HEAD, and a request the policy
   refuses.
-- Stdout gets at most 100000 bytes, headers included, cut on a character
-  boundary, with a note on stderr of how much was left out. A body that isn't
+- Stdout gets at most the policy's `max_stdout_bytes` (48000 unless set),
+  headers included, cut on a character boundary, with a note on stderr of
+  how much was left out; `--help` says the number. A body that isn't
   UTF-8 text is not written to stdout and exits 23. The note points at `-o`.
 - `-o` and `-O` write only inside `KUZL_ROOT`, or the working directory if it
   is unset. A path outside it is refused (exit 2) before the request is sent,
@@ -120,6 +121,12 @@ in instead. The keys:
 - `deny_hosts`: hosts refused, even if `allow_hosts` matches them.
 - `deny_addrs`: IPs and CIDR prefixes never dialed, checked on the address a
   name resolves to.
+- `max_stdout_bytes`: the most `curl` writes to stdout, headers included, a
+  whole number from 1 to 104857600 (100 MiB). Left out, 48000: Claude Code
+  keeps a tool result in context only up to 50000 characters, and a byte is
+  at most a character, so 48000 leaves room for the truncation note and an
+  error's stderr. Change it here, not in the code, if the agent's limit
+  differs.
 
 Every key may be left out. A host not in `allow_hosts` is refused, so with
 `allow_hosts` left out, empty or null, every host is. So is it in a binary

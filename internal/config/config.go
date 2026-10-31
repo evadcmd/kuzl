@@ -19,9 +19,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/netip"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/evadcmd/kuzl/internal/netguard"
 	"go.yaml.in/yaml/v3"
@@ -30,6 +32,26 @@ import (
 // builtin is the policy file, base64-encoded, as the build sets it. Empty is
 // no file, which allows no host.
 var builtin string
+
+const (
+	// DefaultMaxStdoutBytes is max_stdout_bytes when the policy leaves it
+	// out. Claude Code keeps a tool result in context only up to 50000
+	// characters; past that it saves the result to a file and shows a
+	// preview. A byte is at most a character, and 48000 leaves room for what
+	// the caller adds, such as kuzl's truncation note and, on an error,
+	// stderr.
+	DefaultMaxStdoutBytes = 48000
+	// maxStdoutLimit is the most max_stdout_bytes may be: what is shown is
+	// held in memory, and -o downloads no more either.
+	maxStdoutLimit = 100 << 20
+)
+
+// Policy is what the policy file sets.
+type Policy struct {
+	netguard.Rules
+	// MaxStdoutBytes caps what curl writes to stdout, headers included.
+	MaxStdoutBytes int
+}
 
 // file is the policy file. A pointer field is an optional key: nil is the
 // key left out, or set to null.
@@ -42,6 +64,9 @@ type file struct {
 	// DenyAddrs are IPs and CIDR prefixes refused on top of the non-public
 	// addresses, checked on the address dialed.
 	DenyAddrs *list[addrRange] `yaml:"deny_addrs"`
+	// MaxStdoutBytes caps curl's stdout; left out or null, it is
+	// DefaultMaxStdoutBytes.
+	MaxStdoutBytes *byteCount `yaml:"max_stdout_bytes"`
 }
 
 // list is a list of entries. yaml drops a null item from a slice without
@@ -80,6 +105,32 @@ func (r *addrRange) UnmarshalYAML(n *yaml.Node) error {
 	return entryErr(n, err)
 }
 
+// byteCount is max_stdout_bytes: a whole number, from 1 to maxStdoutLimit.
+type byteCount int
+
+func (c *byteCount) UnmarshalYAML(n *yaml.Node) error {
+	// yaml doesn't resolve an integer past int64 as !!int: past uint64 it is
+	// !!float, and between the two it is an !!int that fails to decode into
+	// an int. Either way it is a number of bytes, only too many.
+	if n.Kind == yaml.ScalarNode && n.Style == 0 {
+		if i, ok := new(big.Int).SetString(n.Value, 0); ok && (i.Sign() < 1 || i.Cmp(big.NewInt(maxStdoutLimit)) > 0) {
+			return entryErr(n, fmt.Errorf("max_stdout_bytes %s: want 1 to %d", n.Value, maxStdoutLimit))
+		}
+	}
+	if n.Kind != yaml.ScalarNode || n.ShortTag() != "!!int" {
+		return entryErr(n, fmt.Errorf("max_stdout_bytes should be a number of bytes, not %s", n.ShortTag()))
+	}
+	var v int
+	if err := n.Decode(&v); err != nil {
+		return entryErr(n, err)
+	}
+	if v < 1 || v > maxStdoutLimit {
+		return entryErr(n, fmt.Errorf("max_stdout_bytes %s: want 1 to %d", n.Value, maxStdoutLimit))
+	}
+	*c = byteCount(v)
+	return nil
+}
+
 // str is n as a string, which it must be: 1.5 or true in a host list is a
 // mistake, not a host.
 func str(n *yaml.Node) (string, error) {
@@ -89,7 +140,8 @@ func str(n *yaml.Node) (string, error) {
 	return n.Value, nil
 }
 
-// EntryError is a list entry that isn't valid. yaml stops at the first one.
+// EntryError is a list entry, or a value, that isn't valid. yaml stops at the
+// first one.
 type EntryError struct {
 	Line int
 	Err  error
@@ -119,25 +171,28 @@ const badAlias = "did not find expected alphabetic or numeric character"
 // Parse decodes a policy file. Unknown keys and values of the wrong type are
 // reported together, as a *yaml.TypeError; an invalid entry is an
 // *EntryError; anything else is a syntax error.
-func Parse(data []byte) (netguard.Rules, error) {
+func Parse(data []byte) (Policy, error) {
 	f, err := decodeFile(data)
 	if err != nil {
 		if strings.Contains(err.Error(), badAlias) && unquotedStar.Match(data) {
 			err = fmt.Errorf(`%w (a value starting with * must be quoted, as in "*.example.com")`, err)
 		}
-		return netguard.Rules{}, err
+		return Policy{}, err
 	}
-	var r netguard.Rules
-	for _, p := range deref(f.AllowHosts) {
-		r.AllowHosts = append(r.AllowHosts, p.HostPattern)
+	p := Policy{MaxStdoutBytes: DefaultMaxStdoutBytes}
+	for _, h := range deref(f.AllowHosts) {
+		p.AllowHosts = append(p.AllowHosts, h.HostPattern)
 	}
-	for _, p := range deref(f.DenyHosts) {
-		r.DenyHosts = append(r.DenyHosts, p.HostPattern)
+	for _, h := range deref(f.DenyHosts) {
+		p.DenyHosts = append(p.DenyHosts, h.HostPattern)
 	}
 	for _, a := range deref(f.DenyAddrs) {
-		r.DenyAddrs = append(r.DenyAddrs, a.Prefix)
+		p.DenyAddrs = append(p.DenyAddrs, a.Prefix)
 	}
-	return r, nil
+	if f.MaxStdoutBytes != nil {
+		p.MaxStdoutBytes = int(*f.MaxStdoutBytes)
+	}
+	return p, nil
 }
 
 // decodeFile decodes data as one YAML document, which may be empty.
@@ -166,37 +221,42 @@ func deref[L ~[]T, T any](p *L) L {
 	return *p
 }
 
-// Builtin returns the rules of the policy file built into the binary.
-func Builtin() (netguard.Rules, error) {
+// Builtin returns the policy file built into the binary. It decodes it once:
+// builtin is set at link time, so every call returns the same result.
+var Builtin = sync.OnceValues(func() (Policy, error) {
 	return decode(builtin)
-}
+})
 
-func decode(encoded string) (netguard.Rules, error) {
+func decode(encoded string) (Policy, error) {
 	data, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		return netguard.Rules{}, fmt.Errorf("the built-in policy is not base64 (build with make build POLICY=...): %w", err)
+		return Policy{}, fmt.Errorf("the built-in policy is not base64 (build with make build POLICY=...): %w", err)
 	}
-	r, err := Parse(data)
+	p, err := Parse(data)
 	if err != nil {
-		return netguard.Rules{}, fmt.Errorf("the built-in policy: %w", err)
+		return Policy{}, fmt.Errorf("the built-in policy: %w", err)
 	}
-	return r, nil
+	return p, nil
 }
 
-// Format writes r as a policy file, in normalized form: Parse(Format(r))
-// returns r.
-func Format(r netguard.Rules) []byte {
+// Format writes p as a policy file, in normalized form: for a p that Parse
+// returned, Parse(Format(p)) returns p. (Not for any p: the zero Policy's
+// max_stdout_bytes 0 doesn't parse.)
+func Format(p Policy) []byte {
+	r := p.Rules
 	var out struct {
-		AllowHosts []string `yaml:"allow_hosts"`
-		DenyHosts  []string `yaml:"deny_hosts"`
-		DenyAddrs  []string `yaml:"deny_addrs"`
+		AllowHosts     []string `yaml:"allow_hosts"`
+		DenyHosts      []string `yaml:"deny_hosts"`
+		DenyAddrs      []string `yaml:"deny_addrs"`
+		MaxStdoutBytes int      `yaml:"max_stdout_bytes"`
 	}
 	out.AllowHosts, out.DenyHosts, out.DenyAddrs = []string{}, []string{}, []string{}
-	for _, p := range r.AllowHosts {
-		out.AllowHosts = append(out.AllowHosts, p.String())
+	out.MaxStdoutBytes = p.MaxStdoutBytes
+	for _, h := range r.AllowHosts {
+		out.AllowHosts = append(out.AllowHosts, h.String())
 	}
-	for _, p := range r.DenyHosts {
-		out.DenyHosts = append(out.DenyHosts, p.String())
+	for _, h := range r.DenyHosts {
+		out.DenyHosts = append(out.DenyHosts, h.String())
 	}
 	for _, a := range r.DenyAddrs {
 		if a.IsSingleIP() {
@@ -212,7 +272,7 @@ func Format(r netguard.Rules) []byte {
 	e := yaml.NewEncoder(&b)
 	e.SetIndent(2)
 	if err := errors.Join(e.Encode(out), e.Close()); err != nil {
-		panic(err) // a struct of string lists always encodes
+		panic(err) // a struct of string lists and an int always encodes
 	}
 	return b.Bytes()
 }
