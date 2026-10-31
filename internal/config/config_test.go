@@ -208,28 +208,22 @@ func TestParseUnquotedStar(t *testing.T) {
 	}
 }
 
-func TestBuiltin(t *testing.T) {
-	defer func(old string) { builtin = old }(builtin)
-
-	builtin = ""
-	if r, err := Builtin(); err != nil || len(r.AllowHosts)+len(r.DenyHosts)+len(r.DenyAddrs) != 0 {
+func TestDecode(t *testing.T) {
+	if r, err := decode(""); err != nil || len(r.AllowHosts)+len(r.DenyHosts)+len(r.DenyAddrs) != 0 {
 		t.Errorf("no built-in policy: %+v, %v; want empty rules", r, err)
 	}
-	builtin = base64.StdEncoding.EncodeToString([]byte("deny_addrs:\n  - 1.0.0.0/24\n"))
-	if r, err := Builtin(); err != nil || len(r.DenyAddrs) != 1 || r.DenyAddrs[0].String() != "1.0.0.0/24" {
-		t.Errorf("Builtin() = %+v, %v; want deny_addrs 1.0.0.0/24", r, err)
+	if r, err := decode(base64.StdEncoding.EncodeToString([]byte("deny_addrs:\n  - 1.0.0.0/24\n"))); err != nil || len(r.DenyAddrs) != 1 || r.DenyAddrs[0].String() != "1.0.0.0/24" {
+		t.Errorf("decode() = %+v, %v; want deny_addrs 1.0.0.0/24", r, err)
 	}
-	builtin = base64.StdEncoding.EncodeToString([]byte("max_stdout_bytes: 30000\n"))
-	if r, err := Builtin(); err != nil || r.MaxStdoutBytes != 30000 {
-		t.Errorf("Builtin() = %+v, %v; want max_stdout_bytes 30000", r, err)
+	if r, err := decode(base64.StdEncoding.EncodeToString([]byte("max_stdout_bytes: 30000\n"))); err != nil || r.MaxStdoutBytes != 30000 {
+		t.Errorf("decode() = %+v, %v; want max_stdout_bytes 30000", r, err)
 	}
 	for in, want := range map[string]string{
 		"deny_addrs: [1.0.0.0/24]":                                 "not base64",
 		base64.StdEncoding.EncodeToString([]byte("deny_addr: []")): "the built-in policy: yaml: unmarshal errors:\n  line 1: field deny_addr not found",
 	} {
-		builtin = in
-		if _, err := Builtin(); err == nil || !strings.Contains(err.Error(), want) {
-			t.Errorf("Builtin(%q) = %v, want an error containing %q", in, err, want)
+		if _, err := decode(in); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("decode(%q) = %v, want an error containing %q", in, err, want)
 		}
 	}
 }

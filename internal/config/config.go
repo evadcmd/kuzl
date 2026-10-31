@@ -22,6 +22,7 @@ import (
 	"net/netip"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/evadcmd/kuzl/internal/netguard"
 	"go.yaml.in/yaml/v3"
@@ -211,10 +212,11 @@ func deref[L ~[]T, T any](p *L) L {
 	return *p
 }
 
-// Builtin returns the policy file built into the binary.
-func Builtin() (Policy, error) {
+// Builtin returns the policy file built into the binary. It decodes it once:
+// builtin is set at link time, so every call returns the same result.
+var Builtin = sync.OnceValues(func() (Policy, error) {
 	return decode(builtin)
-}
+})
 
 func decode(encoded string) (Policy, error) {
 	data, err := base64.StdEncoding.DecodeString(encoded)
