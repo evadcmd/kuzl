@@ -71,11 +71,6 @@ var refusedFlags = []struct {
 	takesValue  bool
 	reason      string
 }{
-	{"data", "d", true, "kuzl only sends GET and HEAD"},
-	{"data-ascii", "", true, "kuzl only sends GET and HEAD"},
-	{"data-binary", "", true, "kuzl only sends GET and HEAD"},
-	{"data-raw", "", true, "kuzl only sends GET and HEAD"},
-	{"data-urlencode", "", true, "kuzl only sends GET and HEAD"},
 	{"json", "", true, "kuzl only sends GET and HEAD"},
 	{"form", "F", true, "kuzl only sends GET and HEAD"},
 	{"form-string", "", true, "kuzl only sends GET and HEAD"},
@@ -96,6 +91,38 @@ var refusedFlags = []struct {
 	{"location-trusted", "", false, "kuzl never sends credentials to another origin on a redirect"},
 }
 
+// dataFlags are curl's flags that send data. kuzl takes them only with -G,
+// which puts the data in the query string instead of a request body.
+var dataFlags = []struct {
+	name, short, usage string
+}{
+	{"data", "d", "With -G, add `data` to the query string, already encoded"},
+	{"data-ascii", "", "With -G, add `data` as -d does"},
+	{"data-binary", "", "With -G, add `data` as -d does"},
+	{"data-raw", "", "With -G, add `data` as -d does, with @ not special"},
+	{"data-urlencode", "", "With -G, add `data` to the query string URL-encoded: content, =content or name=content"},
+}
+
+// dataArg is one value of a data flag.
+type dataArg struct {
+	name, short string // the flag's
+	value       string
+}
+
+// dataValue is the pflag.Value of a data flag. They all append to one list, so
+// that the values keep the command line's order, as curl's do.
+type dataValue struct {
+	name, short string
+	list        *[]dataArg
+}
+
+func (d *dataValue) String() string { return "" }
+func (d *dataValue) Type() string   { return "string" }
+func (d *dataValue) Set(s string) error {
+	*d.list = append(*d.list, dataArg{d.name, d.short, s})
+	return nil
+}
+
 // curlFlags are the flags curl takes.
 type curlFlags struct {
 	silent, showError    bool
@@ -114,6 +141,10 @@ type curlFlags struct {
 	maxFilesize          string
 	rangeSpec            string
 	writeOut             string
+	get                  bool
+	data                 []dataArg
+
+	query string // the query -G builds from data; set by RunE
 
 	// Set by newRequest from the flags above.
 	outFile  string // the file -o or -O names; "" for stdout
@@ -127,8 +158,9 @@ func newCurlCmd(s IO, rec *record) *cobra.Command {
 
 Only http and https are fetched, and only from the hosts and public
 addresses this build allows; a URL without a scheme is http. Nothing local
-is ever sent: flags that send data or read a file, such as -d, -F, -T, -K,
--b and -u, are refused with the reason.
+is ever sent: flags that send data or read a file, such as -F, -T, -K, -b
+and -u, are refused with the reason. -d and --data-urlencode are taken only
+with -G, which puts them in the query string, and never read a file.
 
 Stdout stops after 100000 bytes, headers included, with a note on stderr.
 A body that isn't UTF-8 text is not written to stdout. -o and -O write the
@@ -172,6 +204,10 @@ request exits 2 with the reason, even with -s.`
 	fl.StringVar(&f.maxFilesize, "max-filesize", "", "Fail with exit code 63 on a body over `bytes` (k, M and G suffixes); at most 100M, the default with -o")
 	fl.StringVarP(&f.rangeSpec, "range", "r", "", "Ask for these byte `ranges` only, as in 0-499, 500- or -500")
 	fl.StringVarP(&f.writeOut, "write-out", "w", "", "Write `format` to stdout after the transfer, with %{http_code}, %{content_type}, %{url_effective} and %{size_download}")
+	fl.BoolVarP(&f.get, "get", "G", false, "Put the -d and --data-urlencode data in the query string; they are refused without -G")
+	for _, d := range dataFlags {
+		fl.VarP(&dataValue{name: d.name, short: d.short, list: &f.data}, d.name, d.short, d.usage)
+	}
 	for _, r := range refusedFlags {
 		if r.takesValue {
 			fl.StringP(r.name, r.short, "", "")
@@ -189,6 +225,14 @@ request exits 2 with the reason, even with -s.`
 		}
 		if m := f.request; m != "" && m != http.MethodGet && m != http.MethodHead {
 			return &refusalError{err: fmt.Errorf("-X %s is not supported: kuzl only sends GET and HEAD", m)}
+		}
+		if len(f.data) > 0 && !f.get {
+			d := f.data[0]
+			return &refusalError{err: fmt.Errorf("%s without -G is not supported: kuzl only sends GET and HEAD; -G puts the data in the query string", flagName(d.name, d.short))}
+		}
+		var err error
+		if f.query, err = queryData(f.data); err != nil {
+			return err
 		}
 		if len(args) == 0 {
 			return c.Help()
@@ -302,6 +346,13 @@ func (f *curlFlags) newRequest(c *cobra.Command, rawURL string) (*http.Request, 
 		return nil, &curlError{code: exitURLMalformat, err: fmt.Errorf("URL rejected: %w", err), quiet: f.quiet()}
 	}
 	u.Fragment, u.RawFragment = "", ""
+	// -G adds its data after the URL's own query, as curl does.
+	if f.query != "" {
+		if u.RawQuery != "" {
+			u.RawQuery += "&"
+		}
+		u.RawQuery += f.query
+	}
 	req, err := http.NewRequest(method, u.String(), http.NoBody)
 	if err != nil {
 		return nil, &curlError{code: exitURLMalformat, err: fmt.Errorf("URL rejected: %w", err), quiet: f.quiet()}
@@ -385,6 +436,78 @@ func parseHeader(h string) (name, value string, remove bool, err error) {
 		return "", "", false, &refusalError{err: errors.New("-H Host is not supported: the request goes to the URL's host")}
 	}
 	return name, value, remove, nil
+}
+
+// queryData builds the query string of -G from the data flags' values as curl
+// does: joined with &, -d's as given and --data-urlencode's URL-encoded. A
+// value that would read a file, as -d @file does, is refused; --data-raw
+// takes @ as is, as curl does.
+func queryData(data []dataArg) (string, error) {
+	parts := make([]string, 0, len(data))
+	for _, d := range data {
+		switch {
+		case d.name == "data-urlencode":
+			p, err := urlencodeData(d.value)
+			if err != nil {
+				return "", err
+			}
+			parts = append(parts, p)
+		case d.name != "data-raw" && strings.HasPrefix(d.value, "@"):
+			flag := "--" + d.name
+			if d.short != "" {
+				flag = "-" + d.short
+			}
+			return "", &refusalError{err: fmt.Errorf("%s @file is not supported: kuzl reads no local files", flag)}
+		default:
+			parts = append(parts, escapeQuery(d.value))
+		}
+	}
+	return strings.Join(parts, "&"), nil
+}
+
+// urlencodeData encodes a --data-urlencode value as curl does. Up to the
+// first =, it is a name, sent as given, and the rest is encoded; without an
+// =, an @ would name a file to read (@file or name@file), and the value is
+// otherwise encoded whole.
+func urlencodeData(v string) (string, error) {
+	if name, content, ok := strings.Cut(v, "="); ok {
+		if name == "" {
+			return escapeAll(content), nil
+		}
+		return escapeQuery(name) + "=" + escapeAll(content), nil
+	}
+	if strings.Contains(v, "@") {
+		return "", &refusalError{err: fmt.Errorf("--data-urlencode %q is not supported: kuzl reads no local files; write name=content to send an @", v)}
+	}
+	return escapeAll(v), nil
+}
+
+// escapeAll percent-encodes every byte of s but the unreserved ones (RFC
+// 3986), as curl_easy_escape does: a space is %20, not +.
+func escapeAll(s string) string {
+	return escapeExcept(s, "-._~")
+}
+
+// escapeQuery percent-encodes the bytes of s that can't be in a query (RFC
+// 3986), such as spaces, control characters, # and non-ASCII. The rest, %
+// included, is sent as given: -d's value is expected to be encoded already.
+func escapeQuery(s string) string {
+	return escapeExcept(s, "-._~!$&'()*+,;=:@/?%")
+}
+
+// escapeExcept percent-encodes the bytes of s other than letters, digits and
+// the bytes in keep.
+func escapeExcept(s, keep string) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	for _, c := range []byte(s) {
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || strings.IndexByte(keep, c) >= 0 {
+			b.WriteByte(c)
+		} else {
+			b.Write([]byte{'%', hex[c>>4], hex[c&15]})
+		}
+	}
+	return b.String()
 }
 
 // validHeaderName reports whether s is an HTTP token (RFC 9110).
