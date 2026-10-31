@@ -85,8 +85,8 @@ Put it where the real `curl` isn't, or isn't found first on the agent's
 `PATH`: kuzl only helps if the real one can't be run.
 
 The image build checks the policy as `make build` does. To try an unreleased
-build, or one with another policy (a file in the build context, or empty for
-none), build the image locally and copy from that tag instead:
+build, or one with another policy (a file in the build context), build the
+image locally and copy from that tag instead:
 
 ```sh
 docker build -t kuzl:dev .
@@ -96,7 +96,7 @@ docker build -t kuzl:dev --build-arg POLICY=other.yaml --build-arg VERSION=dev .
 ## Testing locally
 
 ```sh
-make build   # builds policy.yaml in; POLICY=other.yaml for another, POLICY= for none
+make build   # builds policy.yaml in; POLICY=other.yaml for another
 bin/kuzl policy
 bin/kuzl curl --help
 ```
@@ -121,8 +121,9 @@ in instead. The keys:
   name resolves to.
 
 Every key may be left out. A host not in `allow_hosts` is refused, so with
-`allow_hosts` left out, empty or null, and with no policy built in
-(`POLICY=`), every host is. An unknown key, a value of the wrong type or an
+`allow_hosts` left out, empty or null, every host is. So is it in a binary
+with no policy built in, such as a plain `go build`'s; `make build` and the
+image build refuse an empty `POLICY` for that reason. An unknown key, a value of the wrong type or an
 invalid entry is an error, reported with its line, rather than skipped.
 `make build` runs `bin/kuzl policy`, which prints the policy as kuzl reads
 it, and fails the build if it doesn't validate.
