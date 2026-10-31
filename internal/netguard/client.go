@@ -35,14 +35,14 @@ func (e *TooManyRedirectsError) Error() string {
 	return fmt.Sprintf("maximum (%d) redirects followed", e.Max)
 }
 
-// resolver is the part of *net.Resolver the dialer uses, so that tests can
+// Resolver is the part of *net.Resolver the dialer uses, so that tests can
 // make names resolve to public addresses.
-type resolver interface {
+type Resolver interface {
 	LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error)
 }
 
-// dialFunc dials an address that is already an IP and port.
-type dialFunc func(ctx context.Context, network, address string) (net.Conn, error)
+// DialFunc dials an address that is already an IP and port.
+type DialFunc func(ctx context.Context, network, address string) (net.Conn, error)
 
 // Client returns an http.Client that only sends requests p allows: every
 // request, redirects included, is checked with CheckURL before it is sent,
@@ -56,7 +56,16 @@ func (p *Policy) Client(o Options) *http.Client {
 	return p.client(o, net.DefaultResolver, d.DialContext)
 }
 
-func (p *Policy) client(o Options, r resolver, dial dialFunc) *http.Client {
+// ClientOver is Client with r and dial in place of DNS and the network, for
+// tests outside this package: they reach an httptest server, which is on
+// loopback, under public names. Every check still runs on what r returns, and
+// dial is only asked for addresses the policy allows; only the last check on
+// the socket (net.Dialer's Control) is left to dial.
+func (p *Policy) ClientOver(o Options, r Resolver, dial DialFunc) *http.Client {
+	return p.client(o, r, dial)
+}
+
+func (p *Policy) client(o Options, r Resolver, dial DialFunc) *http.Client {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.Proxy = nil
 	t.DialContext = (&dialer{policy: p, resolve: r, dial: dial}).DialContext
@@ -135,8 +144,8 @@ func port(u *url.URL) string {
 // to and a second lookup can't return another (DNS rebinding).
 type dialer struct {
 	policy  *Policy
-	resolve resolver
-	dial    dialFunc
+	resolve Resolver
+	dial    DialFunc
 }
 
 func (d *dialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {

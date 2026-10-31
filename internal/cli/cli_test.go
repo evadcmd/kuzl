@@ -149,8 +149,8 @@ func TestRunLogsFlagNamesNotArgs(t *testing.T) {
 func TestRunLogsNoArgsOnError(t *testing.T) {
 	const secret = "SEKRET"
 	for _, args := range [][]string{
-		{"curl", "https://h/?token=" + secret},
-		{"curl", "-x" + secret},
+		{"curl", "-X" + secret},
+		{"curl", "-H", secret, "https://h/"},
 		{"curl", "--version=" + secret},
 		{"kuzl", secret},
 		{"kuzl", secret, "-O", "x"},
