@@ -33,6 +33,14 @@ allow_hosts:
 # same host doesn't go through kuzl: the sandbox's own proxy has to allow it
 # too (evadcmd/taruza#221).
   - static.rust-lang.org
+#
+# The Go toolchain's archives (dl.google.com/go/, where go.dev/dl links to).
+# Unlike rustup-init, an archive is the whole toolchain: once it is
+# unpacked, go needs only proxy.golang.org. Run it with GOTOOLCHAIN=local,
+# or a go.mod that asks for a newer Go has it fetch that toolchain from
+# proxy.golang.org, which redirects to storage.googleapis.com. A linux
+# archive is about 70 MB, under the 100 MiB that -o writes.
+  - dl.google.com
 
 # Hosts requests may not go to, even if allow_hosts matches them.
 #
