@@ -412,6 +412,24 @@ func TestCurlRefusesBinaryOnStdout(t *testing.T) {
 	}
 }
 
+// brokenPipe is a stdout whose reader has gone away.
+type brokenPipe struct{}
+
+func (brokenPipe) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
+
+// A stdout that can't be written exits 23, as curl does, for the body and for
+// the headers that -i writes before a binary body.
+func TestCurlReportsWriteErrors(t *testing.T) {
+	f := newFakeNet(t)
+	for _, args := range [][]string{{"http://public.test/"}, {"-i", "http://public.test/binary"}} {
+		var errOut bytes.Buffer
+		code := Run(append([]string{"curl"}, args...), f.io(t, brokenPipe{}, &errOut, nil))
+		if want := "curl: (23) Failure writing output to destination: broken pipe\n"; code != exitWriteError || errOut.String() != want {
+			t.Errorf("curl %s: got (%d, %q), want (%d, %q)", strings.Join(args, " "), code, errOut.String(), exitWriteError, want)
+		}
+	}
+}
+
 // The record has the host, the method, the status and the byte count, never
 // the path, the query or a header.
 func TestCurlLogsRequestWithoutSecrets(t *testing.T) {

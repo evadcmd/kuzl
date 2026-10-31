@@ -371,7 +371,7 @@ func (f *curlFlags) fetch(ctx context.Context, s IO, req *http.Request, rec *rec
 	n := capAt(data, maxShowBytes)
 	if shown := data[min(len(head), n):n]; bytes.IndexByte(shown, 0) >= 0 || !utf8.Valid(shown) {
 		if _, err := s.Out.Write(data[:min(len(head), n)]); err != nil {
-			return err
+			return f.writeError(err)
 		}
 		// The failed request matters more to the caller than the binary body.
 		if failed {
@@ -384,7 +384,7 @@ func (f *curlFlags) fetch(ctx context.Context, s IO, req *http.Request, rec *rec
 		return &curlError{code: exitWriteError, err: fmt.Errorf("%s is not written to stdout", what)}
 	}
 	if _, err := s.Out.Write(data[:n]); err != nil {
-		return err
+		return f.writeError(err)
 	}
 	if left := int64(len(data)-n) + more; left > 0 {
 		if moreExact {
@@ -463,6 +463,16 @@ func (r *hopRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
 // transferError maps a failed request to curl's exit code and message. A
 // request the policy refuses is a refusalError instead, which -s doesn't
 // silence.
+// writeError is curl's exit 23 for stdout that can't be written, such as a
+// closed pipe.
+func (f *curlFlags) writeError(err error) error {
+	return &curlError{
+		code:  exitWriteError,
+		err:   fmt.Errorf("Failure writing output to destination: %w", err), //nolint:staticcheck // ST1005: curl's message.
+		quiet: f.quiet(),
+	}
+}
+
 func (f *curlFlags) transferError(err error, elapsed time.Duration) error {
 	if re, ok := errors.AsType[*netguard.RefusedError](err); ok {
 		return &refusalError{err: re}
