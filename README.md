@@ -55,6 +55,20 @@ fetched, and only public addresses are dialed: loopback, private, link-local
 ranges are refused, on the address actually connected to. `HTTP(S)_PROXY` is
 ignored.
 
+### Redirects and credentials
+
+Every redirect hop goes through the same checks as the first request.
+`Authorization`, `Cookie` and `Proxy-Authorization` headers are sent only to
+the first request's origin (scheme, host and port), as curl does without
+`--location-trusted`, which kuzl doesn't have. A redirect to a subdomain
+doesn't get them either, though Go's client alone would send them there.
+
+Back on the first origin, later in the chain, they are sent again after a hop
+to a subdomain, as curl does, but not after a hop to another domain: there
+Go's client drops them for the rest of the chain (CVE-2024-45336). Either way,
+they never reach another origin. See
+[#8](https://github.com/evadcmd/kuzl/issues/8).
+
 ### Environment
 
 - `KUZL_ROOT`: the directory `-o` (step 4) writes are confined to. Defaults
