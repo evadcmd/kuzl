@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeNet stands in for DNS and the network: names resolve from its table,
@@ -221,6 +222,33 @@ func TestClientRefusesAnotherHostHeader(t *testing.T) {
 	wantRefused(t, err, "Host header")
 	if d := f.dials(); len(d) != 0 {
 		t.Errorf("dialed %v", d)
+	}
+}
+
+// The client finds CloseIdleConnections on its transport, so checkedTransport
+// has to pass it on, or idle connections stay open until IdleConnTimeout.
+func TestClientClosesIdleConnections(t *testing.T) {
+	closed := make(chan struct{}, 1)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "hello")
+	}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateClosed {
+			closed <- struct{}{}
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+	f := &fakeNet{server: srv.Listener.Addr().String(), hosts: map[string][]string{"public.test": {"8.8.8.8"}}}
+	c := f.client(t, Options{})
+	if _, _, err := get(c, "http://public.test/"); err != nil {
+		t.Fatal(err)
+	}
+	c.CloseIdleConnections()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Error("the idle connection is still open")
 	}
 }
 

@@ -86,6 +86,14 @@ func (t *checkedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	return t.next.RoundTrip(req)
 }
 
+// CloseIdleConnections closes next's idle connections. The client's
+// CloseIdleConnections only reaches a transport that has the method.
+func (t *checkedTransport) CloseIdleConnections() {
+	if c, ok := t.next.(interface{ CloseIdleConnections() }); ok {
+		c.CloseIdleConnections()
+	}
+}
+
 // checkRedirect applies the redirect limit and drops credentials when a
 // redirect leaves the first request's origin. curl drops Authorization and
 // Cookie headers given with -H when the host, the port or the scheme changes
