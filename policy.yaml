@@ -17,7 +17,8 @@
 # *: unquoted, YAML reads them as an alias.
 #
 # The package registries' metadata, for checking a version or a release,
-# and the Go docs.
+# and the Go docs. After them, two toolchain downloads, each explained above
+# its entry.
 allow_hosts:
   - pypi.org
   - files.pythonhosted.org
@@ -27,6 +28,21 @@ allow_hosts:
   - static.crates.io
   - registry.npmjs.org
   - pkg.go.dev
+#
+# rustup-init, the Rust installer, so that an agent fetches it with curl as
+# it does anything else. The toolchain rustup-init then downloads from the
+# same host doesn't go through kuzl: the sandbox's own proxy has to allow it
+# too (evadcmd/taruza#221).
+  - static.rust-lang.org
+#
+# The Go toolchain's archives (dl.google.com/go/, which go.dev/dl links to).
+# Unlike rustup-init, an archive is the whole toolchain: once it is
+# unpacked, go needs only proxy.golang.org. Run it with GOTOOLCHAIN=local,
+# or a go.mod that asks for a newer Go has it fetch that toolchain from
+# proxy.golang.org, which redirects to storage.googleapis.com. With local, go
+# stops there instead, so fetch an archive no older than go.mod's go line. A
+# linux archive is about 70 MB, under the 100 MiB that -o writes.
+  - dl.google.com
 
 # Hosts requests may not go to, even if allow_hosts matches them.
 #
