@@ -1,0 +1,47 @@
+# kuzl's network policy, built into the binary:
+#
+#   make build                     # builds this file in
+#   make build POLICY=other.yaml   # or another one instead
+#   bin/kuzl policy                # prints it as kuzl reads it
+#
+# Every key may be left out. An unknown key, or an entry that isn't valid,
+# fails the build with its line, rather than being skipped.
+#
+# Whatever this says, only http and https are fetched, and loopback, private,
+# link-local (the cloud metadata endpoint included) and the other non-public
+# addresses are never dialed.
+
+# The only hosts requests may go to: left out or empty, no host is. A host
+# entry is example.com, that host only; "*.example.com", its subdomains, not
+# example.com itself; or "*", every public host. Quote entries starting with
+# *: unquoted, YAML reads them as an alias.
+#
+# The package registries' metadata, for checking a version or a release,
+# and the Go docs.
+allow_hosts:
+  - pypi.org
+  - files.pythonhosted.org
+  - proxy.golang.org
+  - sum.golang.org
+  - crates.io
+  - static.crates.io
+  - registry.npmjs.org
+  - pkg.go.dev
+
+# Hosts requests may not go to, even if allow_hosts matches them.
+#
+# These are the hosts taruza denies to WebFetch too (#1): it reaches GitHub
+# through ghzt instead. allow_hosts leaves them out already; listing them
+# here keeps them refused if it ever widens, to "*" say.
+deny_hosts:
+  - github.com
+  - raw.githubusercontent.com
+
+# IPs and CIDR prefixes that are never dialed, on top of the non-public ones.
+# They are checked on the address a name resolves to, so a name can't get
+# around them. Write IPv4 ranges as IPv4. None here: the non-public ranges
+# are refused anyway.
+# deny_addrs:
+#   - 203.0.113.7
+#   - 198.51.100.0/24
+#   - 2001:db8::/32

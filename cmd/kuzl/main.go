@@ -1,5 +1,6 @@
 // Command kuzl is a read-only curl for AI agents: GET and HEAD only, nothing
-// local is ever sent, and where requests may go is set by the environment.
+// local is ever sent, and where requests may go is set by a policy built into
+// the binary.
 // Install it once and symlink it as curl: it picks the command tree by the
 // name it is run as.
 package main
