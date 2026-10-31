@@ -90,16 +90,34 @@ func parseRegistry(r io.Reader) ([]ianaRow, error) {
 
 // refusesAll reports whether Public refuses every address in p.
 func refusesAll(p netip.Prefix) bool {
+	p = p.Masked()
 	if p.Addr().Is4() {
 		return within(p, nonPublic4)
 	}
-	// Outside global6 everything is refused, apart from the forms canonical
-	// turns into IPv4.
-	if p.Bits() >= global6.Bits() && !global6.Contains(p.Addr()) &&
-		!p.Overlaps(mapped4) && !p.Overlaps(nat64) {
+	// The forms canonical turns into IPv4 are judged as that.
+	for _, q := range []netip.Prefix{mapped4, nat64} {
+		if q.Bits() <= p.Bits() && q.Contains(p.Addr()) {
+			return within(netip.PrefixFrom(canonical(p.Addr()), p.Bits()-q.Bits()), nonPublic4)
+		}
+	}
+	// A prefix wider than global6, or holding one of those forms, is judged
+	// half by half.
+	if p.Bits() < global6.Bits() || p.Overlaps(mapped4) || p.Overlaps(nat64) {
+		lo, hi := halves(p)
+		return refusesAll(lo) && refusesAll(hi)
+	}
+	// Outside global6 everything else is refused.
+	if !global6.Contains(p.Addr()) {
 		return true
 	}
 	return within(p, nonPublic6)
+}
+
+// halves splits a masked IPv6 prefix into its two halves.
+func halves(p netip.Prefix) (lo, hi netip.Prefix) {
+	b := p.Addr().As16()
+	b[p.Bits()/8] |= 0x80 >> (p.Bits() % 8)
+	return netip.PrefixFrom(p.Addr(), p.Bits()+1), netip.PrefixFrom(netip.AddrFrom16(b), p.Bits()+1)
 }
 
 // within reports whether one of ps contains all of p.
@@ -140,7 +158,9 @@ func TestIANA(t *testing.T) {
 	for _, url := range []string{ianaIPv4, ianaIPv6} {
 		rows, err := fetchRegistry(t.Context(), url)
 		if err != nil {
-			t.Fatalf("%s: %v", url, err)
+			// Not Fatalf: the other registry is still checked.
+			t.Errorf("%s: %v", url, err)
+			continue
 		}
 		t.Logf("%s: %d blocks", url, len(rows))
 		for _, r := range unrefused(rows) {
@@ -236,16 +256,24 @@ func TestUnrefused(t *testing.T) {
 		{"192.88.99.0/24", "", false}, // terminated, still refused
 		{"192.0.2.0/23", "N/A", true}, // wider than 192.0.2.0/24
 
-		{"fc00::/7", "False", false},       // outside global6
-		{"5f00::/16", "False", false},      // outside global6
-		{"2001:3::/32", "False", false},    // inside 2001::/23
-		{"2001:200::/23", "False", true},   // just past 2001::/23
-		{"3fff::/20", "False", false},      // nonPublic6
-		{"::ffff:0:0/96", "False", false},  // exception
-		{"::ffff:0:0/104", "False", true},  // judged as IPv4: not an exception
-		{"64:ff9b::/96", "False", true},    // NAT64, judged as IPv4
-		{"64:ff9b:1::/48", "False", false}, // local-use NAT64, refused
-		{"::/0", "False", true},            // overlaps global6
+		{"fc00::/7", "False", false},            // outside global6
+		{"5f00::/16", "False", false},           // outside global6
+		{"2001:3::/32", "False", false},         // inside 2001::/23
+		{"2001:200::/23", "False", true},        // just past 2001::/23
+		{"3fff::/20", "False", false},           // nonPublic6
+		{"::ffff:0:0/96", "False", false},       // exception
+		{"::ffff:0:0/104", "False", false},      // 0.0.0.0/8, mapped
+		{"::ffff:10.0.0.0/104", "False", false}, // 10.0.0.0/8, mapped
+		{"::ffff:808:0/104", "False", true},     // 8.0.0.0/8, mapped
+		{"::ffff:8.8.8.0/120", "False", true},   // 8.8.8.0/24, mapped
+		{"64:ff9b::a00:0/104", "False", false},  // 10.0.0.0/8 through NAT64
+		{"64:ff9b::/96", "False", true},         // all of IPv4 through NAT64
+		{"64:ff9b::/95", "False", true},         // holds 64:ff9b::/96
+		{"64:ff9b:1::/48", "False", false},      // local-use NAT64, refused
+		{"8000::/1", "False", false},            // wider than global6, outside it
+		{"c000::/2", "False", false},            // wider than global6, outside it
+		{"::/1", "False", true},                 // holds global6
+		{"::/0", "False", true},                 // holds global6
 	}
 	for _, tt := range tests {
 		got := unrefused([]ianaRow{{prefix: netip.MustParsePrefix(tt.prefix), reachable: tt.reachable}})

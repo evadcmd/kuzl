@@ -40,7 +40,10 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           title="IANA registry check failed"
-          open=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[].number')
+          # The exact title: --search matches words, not the whole title.
+          # --limit: the default 30 could leave the tracking issue out.
+          open=$(gh issue list --state open --limit 1000 --json number,title \
+            --jq "[.[] | select(.title == \"$title\")][0].number // empty")
           if [ -n "$open" ]; then
             echo "Already tracked in #$open"
             exit 0
