@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/netip"
 	"regexp"
 	"strings"
@@ -108,6 +109,14 @@ func (r *addrRange) UnmarshalYAML(n *yaml.Node) error {
 type byteCount int
 
 func (c *byteCount) UnmarshalYAML(n *yaml.Node) error {
+	// yaml doesn't resolve an integer past int64 as !!int: past uint64 it is
+	// !!float, and between the two it is an !!int that fails to decode into
+	// an int. Either way it is a number of bytes, only too many.
+	if n.Kind == yaml.ScalarNode && n.Style == 0 {
+		if i, ok := new(big.Int).SetString(n.Value, 0); ok && (i.Sign() < 1 || i.Cmp(big.NewInt(maxStdoutLimit)) > 0) {
+			return entryErr(n, fmt.Errorf("max_stdout_bytes %s: want 1 to %d", n.Value, maxStdoutLimit))
+		}
+	}
 	if n.Kind != yaml.ScalarNode || n.ShortTag() != "!!int" {
 		return entryErr(n, fmt.Errorf("max_stdout_bytes should be a number of bytes, not %s", n.ShortTag()))
 	}
