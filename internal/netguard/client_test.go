@@ -319,6 +319,11 @@ func TestClientDropsCredentialsOffOrigin(t *testing.T) {
 	if want := "public.test auth= cookie= trace=t1"; err != nil || body != want {
 		t.Errorf("back on the first origin: %q, %v; want %q", body, err, want)
 	}
+	f = newFakeNet(t)
+	body, _, err = get(f.client(t, follow(10)), "http://public.test/to?u=http://sub.public.test/to%3Fu=http://public.test/headers", headers...)
+	if want := "public.test auth=Bearer SEKRET cookie=s=SEKRET trace=t1"; err != nil || body != want {
+		t.Errorf("back on the first origin after a subdomain: %q, %v; want %q", body, err, want)
+	}
 }
 
 // The real client, with the real resolver and dialer, can't reach the
