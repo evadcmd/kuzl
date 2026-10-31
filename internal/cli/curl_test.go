@@ -76,6 +76,7 @@ func (f *fakeNet) dial(ctx context.Context, network, address string) (net.Conn, 
 //   - /binary, /latin1 and /gzip send what they say, /binary with status
 //     ?code=N if given;
 //   - /slow waits for the client to give up;
+//   - /query echoes the method and the raw query;
 //   - anything else says hello.
 func newFakeNet(t *testing.T) *fakeNet {
 	t.Helper()
@@ -124,6 +125,8 @@ func newFakeNet(t *testing.T) *fakeNet {
 			case <-r.Context().Done():
 			case <-time.After(10 * time.Second):
 			}
+		case "/query":
+			_, _ = fmt.Fprintf(w, "%s %s", r.Method, r.URL.RawQuery) //nolint:gosec // G705: a plain-text echo for the test.
 		default:
 			_, _ = io.WriteString(w, "hello from "+r.Host) //nolint:gosec // G705: a plain-text echo for the test.
 		}
@@ -249,9 +252,10 @@ func TestCurlRefusesFlags(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"-d", "@/home/app/.aws/credentials"}, "-d/--data is not supported: kuzl only sends GET and HEAD"},
-		{[]string{"-s", "--data-binary=x"}, "--data-binary is not supported: kuzl only sends GET and HEAD"},
-		{[]string{"-dx"}, "-d/--data is not supported: kuzl only sends GET and HEAD"},
+		{[]string{"-d", "@/home/app/.aws/credentials"}, "-d/--data without -G is not supported: kuzl only sends GET and HEAD; -G puts the data in the query string"},
+		{[]string{"-s", "--data-binary=x"}, "--data-binary without -G is not supported: kuzl only sends GET and HEAD; -G puts the data in the query string"},
+		{[]string{"-dx"}, "-d/--data without -G is not supported: kuzl only sends GET and HEAD; -G puts the data in the query string"},
+		{[]string{"--data-urlencode", "q=x"}, "--data-urlencode without -G is not supported: kuzl only sends GET and HEAD; -G puts the data in the query string"},
 		{[]string{"--json", "{}"}, "--json is not supported: kuzl only sends GET and HEAD"},
 		{[]string{"-F", "f=@x"}, "-F/--form is not supported: kuzl only sends GET and HEAD"},
 		{[]string{"-T", "x"}, "-T/--upload-file is not supported: kuzl only sends GET and HEAD"},
@@ -273,14 +277,14 @@ func TestCurlRefusesFlags(t *testing.T) {
 		check(t, f, append(tt.args, url), want{exitUsage, "", "curl: " + tt.want + "\n"})
 	}
 	// Without a URL too: the reason beats the help page.
-	check(t, f, []string{"-d", "x"}, want{exitUsage, "", "curl: -d/--data is not supported: kuzl only sends GET and HEAD\n"})
+	check(t, f, []string{"-d", "x"}, want{exitUsage, "", "curl: -d/--data without -G is not supported: kuzl only sends GET and HEAD; -G puts the data in the query string\n"})
 	check(t, f, []string{"-X", "PUT"}, want{exitUsage, "", "curl: -X PUT is not supported: kuzl only sends GET and HEAD\n"})
 	if n := f.requests.Load(); n != 0 {
 		t.Errorf("%d requests sent, want none", n)
 	}
 	// The refused flags stay out of the help.
 	_, stdout, _ := f.curl(t, "--help")
-	if strings.Contains(stdout, "--data") || strings.Contains(stdout, "--proxy") {
+	if strings.Contains(stdout, "--json") || strings.Contains(stdout, "--proxy") {
 		t.Errorf("help lists refused flags:\n%s", stdout)
 	}
 }
@@ -633,4 +637,71 @@ func TestCurlWriteOut(t *testing.T) {
 	check(t, f, []string{"-w", "%{time_total}", "http://public.test/"},
 		want{exitUsage, "", "curl: -w: unknown variable %{time_total}: kuzl knows %{http_code}, %{content_type}, %{url_effective}, %{size_download}\n" + hint})
 	check(t, f, []string{"-w", "%{http_code", "http://public.test/"}, want{exitUsage, "", "curl: -w: \"%{\" without a closing \"}\"\n" + hint})
+}
+
+func TestCurlGetQuery(t *testing.T) {
+	f := newFakeNet(t)
+	const url = "http://public.test/query"
+	tests := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"-G"}, "GET "},
+		{[]string{"-G", "-d", "a=1", "-d", "b=2"}, "GET a=1&b=2"},
+		// After the URL's own query; the fragment still isn't sent.
+		{[]string{"-G", "-d", "a=1", url + "?x=1#frag"}, "GET x=1&a=1"},
+		{[]string{"-G", "-d", "a=1", url + "?"}, "GET a=1"},
+		// -d is sent as given, but for the bytes a query can't hold.
+		{[]string{"-G", "-d", "q=a+b%20c", "-d", "r=a b#c\né"}, "GET q=a+b%20c&r=a%20b%23c%0A%C3%A9"},
+		// --data-urlencode encodes what follows the first =, all of it without
+		// one.
+		{[]string{"-G", "--data-urlencode", "q=a b&c=d+e/é", "--data-urlencode", "=x y", "--data-urlencode", "x y"}, "GET q=a%20b%26c%3Dd%2Be%2F%C3%A9&x%20y&x%20y"},
+		{[]string{"-G", "--data-urlencode", "mail=a@b.test"}, "GET mail=a%40b.test"},
+		// The flags keep the command line's order, as curl's do, and
+		// --data-raw takes @ as is.
+		{[]string{"-d", "a=1", "--data-urlencode", "b=c d", "--data-raw", "@e", "-G", "--data-ascii", "f", "--data-binary", "g"}, "GET a=1&b=c%20d&@e&f&g"},
+	}
+	for _, tt := range tests {
+		args := tt.args
+		if !strings.HasPrefix(args[len(args)-1], "http") {
+			args = append(args, url)
+		}
+		check(t, f, args, want{exitOK, tt.want, ""})
+	}
+	// With -I, HEAD: the query is in the URL it went to.
+	check(t, f, []string{"-IG", "-d", "a=1", "-o", "head.txt", "-w", "%{url_effective}", url}, want{exitOK, url + "?a=1", ""})
+}
+
+// No data flag reads a file, with -G or without.
+func TestCurlGetQueryRefusals(t *testing.T) {
+	f := newFakeNet(t)
+	const url = "http://public.test/query"
+	tests := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"-G", "-d", "@/home/app/.aws/credentials"}, "-d @file is not supported: kuzl reads no local files"},
+		{[]string{"-sG", "--data-binary", "@x"}, "--data-binary @file is not supported: kuzl reads no local files"},
+		{[]string{"-G", "--data-ascii", "@x"}, "--data-ascii @file is not supported: kuzl reads no local files"},
+		{[]string{"-G", "-d", "a=1", "--data-urlencode", "@x"}, `--data-urlencode "@x" is not supported: kuzl reads no local files; write name=content to send an @`},
+		{[]string{"-G", "--data-urlencode", "name@x"}, `--data-urlencode "name@x" is not supported: kuzl reads no local files; write name=content to send an @`},
+	}
+	for _, tt := range tests {
+		check(t, f, append(tt.args, url), want{exitUsage, "", "curl: " + tt.want + "\n"})
+	}
+	// Without a URL too.
+	check(t, f, []string{"-G", "-d", "@x"}, want{exitUsage, "", "curl: -d @file is not supported: kuzl reads no local files\n"})
+	if n := f.requests.Load(); n != 0 {
+		t.Errorf("%d requests sent, want none", n)
+	}
+}
+
+func TestEscape(t *testing.T) {
+	const all = " !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~\x00\x7fé"
+	if got, want := escapeAll(all), "%20%21%22%23%24%25%26%27%28%29%2A%2B%2C-.%2F%3A%3B%3C%3D%3E%3F%40%5B%5C%5D%5E_%60%7B%7C%7D~%00%7F%C3%A9"; got != want {
+		t.Errorf("escapeAll = %q, want %q", got, want)
+	}
+	if got, want := escapeQuery(all), "%20!%22%23$%&'()*+,-./:;%3C=%3E?@%5B%5C%5D%5E_%60%7B%7C%7D~%00%7F%C3%A9"; got != want {
+		t.Errorf("escapeQuery = %q, want %q", got, want)
+	}
 }
