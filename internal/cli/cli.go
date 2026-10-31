@@ -9,11 +9,13 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/evadcmd/kuzl/internal/config"
 	"github.com/evadcmd/kuzl/internal/netguard"
+	"github.com/evadcmd/kuzl/internal/workspace"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -42,6 +44,16 @@ type IO struct {
 	// from the policy built into the binary. Tests point it at an httptest
 	// server.
 	Client func(netguard.Options) (*http.Client, error)
+	// Getenv reads the environment, for KUZL_ROOT; nil is os.Getenv.
+	Getenv func(string) string
+}
+
+func (s IO) root() (*workspace.Root, error) {
+	getenv := s.Getenv
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	return workspace.FromEnv(getenv)
 }
 
 func (s IO) client(o netguard.Options) (*http.Client, error) {

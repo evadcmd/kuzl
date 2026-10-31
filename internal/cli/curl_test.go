@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -20,6 +22,7 @@ import (
 	"time"
 
 	"github.com/evadcmd/kuzl/internal/netguard"
+	"github.com/evadcmd/kuzl/internal/workspace"
 )
 
 // fakeNet stands in for DNS and the network, as netguard's tests do: names
@@ -27,6 +30,7 @@ import (
 // which tells the virtual hosts apart by the Host header.
 type fakeNet struct {
 	server   string
+	root     string // KUZL_ROOT
 	requests atomic.Int32
 }
 
@@ -83,7 +87,7 @@ func newFakeNet(t *testing.T) *fakeNet {
 		case "/to":
 			http.Redirect(w, r, q.Get("u"), http.StatusFound) //nolint:gosec // G710: the open redirect is what the test needs.
 		case "/headers":
-			for _, h := range []string{"Accept", "User-Agent", "Referer", "Authorization", "X-A", "X-Empty"} {
+			for _, h := range []string{"Accept", "User-Agent", "Referer", "Authorization", "Range", "X-A", "X-Empty"} {
 				if v, ok := r.Header[h]; ok {
 					_, _ = fmt.Fprintf(w, "%s=%q\n", h, v) //nolint:gosec // G705: a plain-text echo for the test.
 				}
@@ -126,6 +130,7 @@ func newFakeNet(t *testing.T) *fakeNet {
 	}))
 	t.Cleanup(srv.Close)
 	f.server = srv.Listener.Addr().String()
+	f.root = t.TempDir()
 	return f
 }
 
@@ -137,6 +142,12 @@ func (f *fakeNet) io(t *testing.T, out, errOut io.Writer, log *slog.Logger) IO {
 	return IO{
 		In: strings.NewReader(""), Out: out, ErrOut: errOut, Log: log,
 		Client: func(o netguard.Options) (*http.Client, error) { return p.ClientOver(o, f, f.dial), nil },
+		Getenv: func(k string) string {
+			if k == workspace.EnvRoot {
+				return f.root
+			}
+			return ""
+		},
 	}
 }
 
@@ -385,13 +396,13 @@ func TestCurlCapsStdout(t *testing.T) {
 	f := newFakeNet(t)
 	all := strings.Repeat("b", maxShowBytes)
 	for _, q := range []string{"n=100005", "n=100005&chunked=1"} {
-		check(t, f, []string{"http://public.test/big?" + q}, want{exitOK, all, "… truncated, 5 more bytes\n"})
+		check(t, f, []string{"http://public.test/big?" + q}, want{exitOK, all, "… truncated, 5 more bytes; use -o to save it all\n"})
 	}
 	check(t, f, []string{"http://public.test/big?n=100000&chunked=1"}, want{exitOK, all, ""})
 	// The cut falls on a character boundary: é is two bytes, and the 100000th
 	// is its first.
 	s := "x" + strings.Repeat("é", maxShowBytes/2)
-	check(t, f, []string{"http://public.test/big?n=3&s=" + s}, want{exitOK, s[:maxShowBytes-1], "… truncated, 5 more bytes\n"})
+	check(t, f, []string{"http://public.test/big?n=3&s=" + s}, want{exitOK, s[:maxShowBytes-1], "… truncated, 5 more bytes; use -o to save it all\n"})
 
 	// Headers count towards the cap.
 	code, stdout, stderr := f.curl(t, "-i", "http://public.test/big?n=100000")
@@ -403,8 +414,8 @@ func TestCurlCapsStdout(t *testing.T) {
 
 func TestCurlRefusesBinaryOnStdout(t *testing.T) {
 	f := newFakeNet(t)
-	check(t, f, []string{"-s", "http://public.test/binary"}, want{exitWriteError, "", "curl: (23) binary output (Content-Type image/png) is not written to stdout\n"})
-	check(t, f, []string{"http://public.test/latin1"}, want{exitWriteError, "", "curl: (23) binary output (Content-Type text/plain; charset=utf-8) is not written to stdout\n"})
+	check(t, f, []string{"-s", "http://public.test/binary"}, want{exitWriteError, "", "curl: (23) binary output (Content-Type image/png) is not written to stdout; use -o to save it\n"})
+	check(t, f, []string{"http://public.test/latin1"}, want{exitWriteError, "", "curl: (23) binary output (Content-Type text/plain; charset=utf-8) is not written to stdout; use -o to save it\n"})
 	// The headers still come out with -i.
 	code, stdout, _ := f.curl(t, "-i", "http://public.test/binary")
 	if code != exitWriteError || !strings.HasPrefix(stdout, "HTTP/1.1 200 OK\r\n") || !strings.HasSuffix(stdout, "\r\n\r\n") {
@@ -450,4 +461,169 @@ func TestCurlLogsRequestWithoutSecrets(t *testing.T) {
 	if strings.Contains(logged.String(), "SEKRET") || strings.Contains(logged.String(), "/big") {
 		t.Errorf("log = %q, want no path, query or header", logged.String())
 	}
+
+	// Nor the name of the -o file.
+	logged.Reset()
+	Run([]string{"curl", "-o", "SEKRET.txt", "http://public.test/"}, s)
+	if !strings.Contains(logged.String(), `"output"`) || strings.Contains(logged.String(), "SEKRET") {
+		t.Errorf("log = %q, want the flag name only", logged.String())
+	}
+}
+
+// wantFile checks that name, under f's root, holds content.
+func (f *fakeNet) wantFile(t *testing.T, name, content string) {
+	t.Helper()
+	got, err := os.ReadFile(filepath.Join(f.root, name)) //nolint:gosec // G304: a path under the test temp dir.
+	if err != nil || string(got) != content {
+		t.Errorf("%s = %q, %v; want %q", name, clip(string(got)), err, clip(content))
+	}
+}
+
+func (f *fakeNet) wantNoFile(t *testing.T, name string) {
+	t.Helper()
+	if _, err := os.Lstat(filepath.Join(f.root, name)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("%s: %v, want no such file", name, err)
+	}
+}
+
+func TestCurlOutput(t *testing.T) {
+	f := newFakeNet(t)
+	check(t, f, []string{"-o", "out.txt", "http://public.test/"}, want{exitOK, "", ""})
+	f.wantFile(t, "out.txt", "hello from public.test")
+	// Binary bodies, and bodies over the stdout cap, go to a file whole, and
+	// missing directories are made.
+	check(t, f, []string{"-o", "sub/dir/b.png", "http://public.test/binary"}, want{exitOK, "", ""})
+	f.wantFile(t, "sub/dir/b.png", "\x89PNG\r\n\x1a\n\x00\x00")
+	check(t, f, []string{"--create-dirs", "-o", filepath.Join(f.root, "big.txt"), "http://public.test/big?n=200000&chunked=1"}, want{exitOK, "", ""})
+	f.wantFile(t, "big.txt", strings.Repeat("b", 200000))
+	// -i and -I put the headers in the file, as curl does.
+	check(t, f, []string{"-i", "-o", "head.txt", "http://public.test/"}, want{exitOK, "", ""})
+	got, _ := os.ReadFile(filepath.Join(f.root, "head.txt")) //nolint:gosec // G304: a path under the test temp dir.
+	if !bytes.HasPrefix(got, []byte("HTTP/1.1 200 OK\r\n")) || !bytes.HasSuffix(got, []byte("\r\n\r\nhello from public.test")) {
+		t.Errorf("-i -o wrote %q, want the headers and the body", got)
+	}
+	// - is stdout.
+	check(t, f, []string{"-o", "-", "http://public.test/"}, want{exitOK, "hello from public.test", ""})
+
+	// -O takes the last segment of the URL as given, not decoded and without
+	// the query.
+	check(t, f, []string{"-O", "http://public.test/dl/name.txt?x=1"}, want{exitOK, "", ""})
+	f.wantFile(t, "name.txt", "hello from public.test")
+	check(t, f, []string{"-O", "http://public.test/a%2Fb.txt"}, want{exitOK, "", ""})
+	f.wantFile(t, "a%2Fb.txt", "hello from public.test")
+	// A redirect doesn't rename the file.
+	check(t, f, []string{"-LO", "http://public.test/to?u=http://sub.public.test/other.txt"}, want{exitOK, "", ""})
+	f.wantFile(t, "to", "hello from sub.public.test")
+	f.wantNoFile(t, "other.txt")
+}
+
+func TestCurlOutputFail(t *testing.T) {
+	f := newFakeNet(t)
+	const url = "http://public.test/status?code=404"
+	// -f writes no file; --fail-with-body writes the body, as curl does.
+	check(t, f, []string{"-f", "-o", "f.txt", url}, want{exitHTTPReturned, "", "curl: (22) The requested URL returned error: 404\n"})
+	f.wantNoFile(t, "f.txt")
+	check(t, f, []string{"--fail-with-body", "-o", "f.txt", url}, want{exitHTTPReturned, "", "curl: (22) The requested URL returned error: 404\n"})
+	f.wantFile(t, "f.txt", "status body")
+}
+
+// A file outside the root is refused before anything is sent.
+func TestCurlOutputRefusals(t *testing.T) {
+	f := newFakeNet(t)
+	hint := "Run 'curl --help' for usage.\n"
+	outside := filepath.Join(filepath.Dir(f.root), "out.txt")
+	check(t, f, []string{"-o", "../out.txt", "http://public.test/"}, want{exitUsage, "", "curl: -o ../out.txt: outside " + f.root + "\n"})
+	check(t, f, []string{"-so", outside, "http://public.test/"}, want{exitUsage, "", "curl: -o " + outside + ": outside " + f.root + "\n"})
+	check(t, f, []string{"-O", "http://public.test/a/.."}, want{exitUsage, "", "curl: -O ..: outside " + f.root + "\n"})
+	check(t, f, []string{"-O", "http://public.test/"}, want{exitWriteError, "", "curl: (23) Remote file name has no length\n"})
+	check(t, f, []string{"-o", "x", "-O", "http://public.test/x"}, want{exitUsage, "", "curl: use -o or -O, not both\n" + hint})
+	if n := f.requests.Load(); n != 0 {
+		t.Errorf("%d requests sent, want none", n)
+	}
+
+	// A symlink is found when the file is opened, after the request.
+	secret := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(secret, []byte("key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(f.root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	check(t, f, []string{"-o", "link", "http://public.test/"}, want{exitWriteError, "", "curl: (23) Failed to open the file link: not a regular file\n"})
+	if got, _ := os.ReadFile(secret); string(got) != "key" { //nolint:gosec // G304: a path under the test temp dir.
+		t.Errorf("secret = %q, want it untouched", got)
+	}
+}
+
+func TestCurlMaxFilesize(t *testing.T) {
+	f := newFakeNet(t)
+	const tooBig = "curl: (63) Maximum file size exceeded\n"
+	// With a Content-Length or without, nothing is written to stdout.
+	check(t, f, []string{"--max-filesize", "10", "http://public.test/big?n=11"}, want{exitFileSizeExceeded, "", tooBig})
+	check(t, f, []string{"--max-filesize", "10", "http://public.test/big?n=11&chunked=1"}, want{exitFileSizeExceeded, "", tooBig})
+	check(t, f, []string{"-s", "--max-filesize", "10", "http://public.test/big?n=11"}, want{exitFileSizeExceeded, "", ""})
+	check(t, f, []string{"--max-filesize", "10", "http://public.test/big?n=10&chunked=1"}, want{exitOK, "bbbbbbbbbb", ""})
+	check(t, f, []string{"--max-filesize", "1k", "http://public.test/big?n=1024&chunked=1"}, want{exitOK, strings.Repeat("b", 1024), ""})
+	// Past the stdout cap, it is the whole body that counts.
+	check(t, f, []string{"--max-filesize", "100001", "http://public.test/big?n=100002&chunked=1"}, want{exitFileSizeExceeded, "", tooBig})
+	check(t, f, []string{"--max-filesize", "100002", "http://public.test/big?n=100002&chunked=1"},
+		want{exitOK, strings.Repeat("b", maxShowBytes), "… truncated, 2 more bytes; use -o to save it all\n"})
+
+	// -o: a Content-Length over the limit writes no file; a body without one
+	// stops at the limit and leaves what was written.
+	check(t, f, []string{"--max-filesize", "10", "-o", "cl.txt", "http://public.test/big?n=11"}, want{exitFileSizeExceeded, "", tooBig})
+	f.wantNoFile(t, "cl.txt")
+	check(t, f, []string{"--max-filesize", "10", "-o", "chunked.txt", "http://public.test/big?n=11&chunked=1"}, want{exitFileSizeExceeded, "", tooBig})
+	f.wantFile(t, "chunked.txt", "bbbbbbbbbb")
+	check(t, f, []string{"--max-filesize", "10", "-o", "ok.txt", "http://public.test/big?n=10&chunked=1"}, want{exitOK, "", ""})
+	f.wantFile(t, "ok.txt", "bbbbbbbbbb")
+
+	hint := "Run 'curl --help' for usage.\n"
+	for _, v := range []string{"", "1x", "-1", "k", "9223372036854775807k"} {
+		check(t, f, []string{"--max-filesize", v, "http://public.test/"}, want{exitUsage, "", fmt.Sprintf("curl: --max-filesize %q: want a number of bytes, with k, M or G or without\n", v) + hint})
+	}
+	check(t, f, []string{"--max-filesize", "101M", "http://public.test/"}, want{exitUsage, "", "curl: --max-filesize 101M: kuzl downloads at most 100M\n" + hint})
+}
+
+func TestParseSize(t *testing.T) {
+	for s, want := range map[string]int64{"0": 0, "10": 10, "2k": 2 << 10, "3K": 3 << 10, "1M": 1 << 20, "1g": 1 << 30} {
+		if got, ok := parseSize(s); !ok || got != want {
+			t.Errorf("parseSize(%q) = %d, %v; want %d", s, got, ok, want)
+		}
+	}
+}
+
+func TestCurlRange(t *testing.T) {
+	f := newFakeNet(t)
+	const url = "http://public.test/headers"
+	for _, r := range []string{"0-499", "500-", "-500", "0-0,-1"} {
+		check(t, f, []string{"-r", r, url}, want{exitOK, "Accept=[\"*/*\"]\nUser-Agent=[\"kuzl/dev\"]\nRange=[\"bytes=" + r + "\"]\nmethod=GET\n", ""})
+	}
+	// -H comes last, as for the other headers.
+	check(t, f, []string{"-r", "1-2", "-H", "Range: bytes=5-", url}, want{exitOK, "Accept=[\"*/*\"]\nUser-Agent=[\"kuzl/dev\"]\nRange=[\"bytes=5-\"]\nmethod=GET\n", ""})
+	hint := "Run 'curl --help' for usage.\n"
+	for _, r := range []string{"abc", "-", "1-2,", "bytes=1-2"} {
+		check(t, f, []string{"-r", r, url}, want{exitUsage, "", fmt.Sprintf("curl: -r %q: want byte ranges, as in 0-499, 500- or -500\n", r) + hint})
+	}
+}
+
+func TestCurlWriteOut(t *testing.T) {
+	f := newFakeNet(t)
+	check(t, f, []string{"-w", `\n%{http_code} %{content_type}\n`, "http://public.test/status?code=404"},
+		want{exitOK, "status body\n404 text/plain; charset=utf-8\n", ""})
+	// The size is the body's, and the URL the last hop's.
+	check(t, f, []string{"-L", "-o", "out.txt", "-w", `%{size_download}\t%{url_effective}`, "http://public.test/to?u=http://sub.public.test/x"},
+		want{exitOK, "26\thttp://sub.public.test/x", ""})
+	check(t, f, []string{"-w", `100%% %{http_code}\\`, "-o", "out.txt", "http://public.test/"}, want{exitOK, `100% 200\`, ""})
+	// It comes after a failed transfer too, as curl's does, but not after a
+	// refusal, where nothing was sent.
+	check(t, f, []string{"-sf", "-w", "%{http_code}", "http://public.test/status?code=404"}, want{exitHTTPReturned, "404", ""})
+	check(t, f, []string{"-s", "-w", "%{http_code}", "http://nxdomain.test/"}, want{exitCouldntResolve, "000", ""})
+	check(t, f, []string{"-s", "-w", "%{http_code}", "http://denied.test/"}, want{exitUsage, "", "curl: host denied.test is in deny_hosts\n"})
+
+	hint := "Run 'curl --help' for usage.\n"
+	check(t, f, []string{"-w", "@fmt.txt", "http://public.test/"}, want{exitUsage, "", "curl: -w @file is not supported: kuzl reads no local files\n"})
+	check(t, f, []string{"-w", "%{time_total}", "http://public.test/"},
+		want{exitUsage, "", "curl: -w: unknown variable %{time_total}: kuzl knows %{http_code}, %{content_type}, %{url_effective}, %{size_download}\n" + hint})
+	check(t, f, []string{"-w", "%{http_code", "http://public.test/"}, want{exitUsage, "", "curl: -w: \"%{\" without a closing \"}\"\n" + hint})
 }

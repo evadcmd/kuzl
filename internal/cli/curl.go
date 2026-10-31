@@ -8,16 +8,19 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/evadcmd/kuzl/internal/netguard"
+	"github.com/evadcmd/kuzl/internal/workspace"
 	"github.com/spf13/cobra"
 )
 
@@ -28,12 +31,22 @@ const (
 	// maxCountBytes is how far past maxShowBytes a body is read to say how
 	// much was left out, when its length isn't known up front.
 	maxCountBytes = 100 << 20
+	// maxDownloadBytes caps the body -o writes, and --max-filesize.
+	maxDownloadBytes = 100 << 20
 	// defaultMaxRedirs is kuzl's --max-redirs; curl's is 50.
 	defaultMaxRedirs = 10
 )
 
-// hasScheme matches a URL that starts with a scheme (RFC 3986) and "://".
-var hasScheme = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://`)
+var (
+	// hasScheme matches a URL that starts with a scheme (RFC 3986) and "://".
+	hasScheme = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://`)
+	// validRange matches an -r value: byte ranges as in 0-499, 500- or -500,
+	// separated by commas.
+	validRange = regexp.MustCompile(`^(\d+-\d*|-\d+)(,(\d+-\d*|-\d+))*$`)
+)
+
+// writeOutNames are the -w variables kuzl knows.
+var writeOutNames = []string{"http_code", "content_type", "url_effective", "size_download"}
 
 // curl's exit codes for the failures kuzl reports.
 const (
@@ -47,6 +60,7 @@ const (
 	exitTooManyRedirects = 47
 	exitRecvError        = 56
 	exitPeerFailed       = 60
+	exitFileSizeExceeded = 63
 )
 
 // refusedFlags are curl flags kuzl declines, with the reason it gives. They
@@ -94,6 +108,16 @@ type curlFlags struct {
 	userAgent, referer   *string // nil if not set
 	maxTime, connTimeout float64
 	compressed           bool
+	output               string
+	remoteName           bool
+	createDirs           bool
+	maxFilesize          string
+	rangeSpec            string
+	writeOut             string
+
+	// Set by newRequest from the flags above.
+	outFile  string // the file -o or -O names; "" for stdout
+	maxBytes int64  // --max-filesize; 0 if not set
 }
 
 func newCurlCmd(s IO, rec *record) *cobra.Command {
@@ -107,12 +131,14 @@ is ever sent: flags that send data or read a file, such as -d, -F, -T, -K,
 -b and -u, are refused with the reason.
 
 Stdout stops after 100000 bytes, headers included, with a note on stderr.
-A body that isn't UTF-8 text is not written to stdout.
+A body that isn't UTF-8 text is not written to stdout. -o and -O write the
+response to a file instead, up to 100 MiB, and only inside $KUZL_ROOT (the
+working directory if unset).
 
 Errors are curl's: "curl: (N) message" on stderr and exit code N, such as 6
 (couldn't resolve), 7 (couldn't connect), 22 (-f and HTTP >= 400), 28
-(timeout) and 47 (too many redirects). A refused request exits 2 with the
-reason, even with -s.`
+(timeout), 47 (too many redirects) and 63 (--max-filesize). A refused
+request exits 2 with the reason, even with -s.`
 	cmd.Args = func(c *cobra.Command, args []string) error {
 		if len(args) > 1 {
 			return &usageError{err: fmt.Errorf("expected one URL, got %d", len(args)), cmdPath: c.CommandPath()}
@@ -140,6 +166,12 @@ reason, even with -s.`
 	fl.Float64VarP(&f.maxTime, "max-time", "m", 0, "Give up after `seconds` in all")
 	fl.Float64Var(&f.connTimeout, "connect-timeout", 0, "Give up connecting after `seconds`")
 	fl.BoolVar(&f.compressed, "compressed", false, "Ask for a compressed response (always done; kept for curl's command lines)")
+	fl.StringVarP(&f.output, "output", "o", "", "Write to `file` instead of stdout, inside $KUZL_ROOT; - is stdout")
+	fl.BoolVarP(&f.remoteName, "remote-name", "O", false, "Write to a file named as the URL's last path segment")
+	fl.BoolVar(&f.createDirs, "create-dirs", false, "Create the directories -o needs (always done; kept for curl's command lines)")
+	fl.StringVar(&f.maxFilesize, "max-filesize", "", "Fail with exit code 63 on a body over `bytes` (k, M and G suffixes); at most 100M, the default with -o")
+	fl.StringVarP(&f.rangeSpec, "range", "r", "", "Ask for these byte `ranges` only, as in 0-499, 500- or -500")
+	fl.StringVarP(&f.writeOut, "write-out", "w", "", "Write `format` to stdout after the transfer, with %{http_code}, %{content_type}, %{url_effective} and %{size_download}")
 	for _, r := range refusedFlags {
 		if r.takesValue {
 			fl.StringP(r.name, r.short, "", "")
@@ -171,10 +203,29 @@ reason, even with -s.`
 		if err != nil {
 			return err
 		}
+		// A file outside the root is refused before anything is sent.
+		var root *workspace.Root
+		if f.outFile != "" {
+			if root, err = s.root(); err != nil {
+				return err
+			}
+			defer func() { _ = root.Close() }()
+			if err := root.Check(f.outFile); err != nil {
+				return &refusalError{err: fmt.Errorf("%s %w", outFlag(f.remoteName), err)}
+			}
+		}
 		rec.add("host", req.URL.Hostname(), "method", req.Method)
-		return f.fetch(c.Context(), s, req, rec)
+		return f.fetch(c.Context(), s, req, root, rec)
 	}
 	return cmd
+}
+
+// outFlag names the flag that set the output file, for messages.
+func outFlag(remoteName bool) string {
+	if remoteName {
+		return "-O"
+	}
+	return "-o"
 }
 
 func flagName(name, short string) string {
@@ -210,6 +261,28 @@ func (f *curlFlags) newRequest(c *cobra.Command, rawURL string) (*http.Request, 
 	if f.maxTime < 0 || f.connTimeout < 0 {
 		return nil, usage("a timeout can't be negative")
 	}
+	if f.output != "" && f.remoteName {
+		return nil, usage("use -o or -O, not both")
+	}
+	if c.Flags().Changed("max-filesize") {
+		n, ok := parseSize(f.maxFilesize)
+		if !ok {
+			return nil, usage("--max-filesize %q: want a number of bytes, with k, M or G or without", f.maxFilesize)
+		}
+		if n > maxDownloadBytes {
+			return nil, usage("--max-filesize %s: kuzl downloads at most 100M", f.maxFilesize)
+		}
+		f.maxBytes = n
+	}
+	if f.rangeSpec != "" && !validRange.MatchString(f.rangeSpec) {
+		return nil, usage("-r %q: want byte ranges, as in 0-499, 500- or -500", f.rangeSpec)
+	}
+	if strings.HasPrefix(f.writeOut, "@") {
+		return nil, &refusalError{err: errors.New("-w @file is not supported: kuzl reads no local files")}
+	}
+	if _, err := expandWriteOut(f.writeOut, nil); err != nil {
+		return nil, usage("-w: %v", err)
+	}
 
 	// curl takes a URL without a scheme as http. Only a scheme at the start
 	// counts: "://" in a query (?next=https://…) isn't one.
@@ -229,7 +302,20 @@ func (f *curlFlags) newRequest(c *cobra.Command, rawURL string) (*http.Request, 
 		return nil, &curlError{code: exitURLMalformat, err: fmt.Errorf("URL rejected: %w", err), quiet: f.quiet()}
 	}
 
-	// As curl does, Accept: */* and its own User-Agent; -A, -e and -H
+	switch {
+	case f.remoteName:
+		// As curl does, the URL as given names the file, not the one a
+		// redirect leads to, and it isn't decoded: %2F stays in the name.
+		p := u.EscapedPath()
+		f.outFile = p[strings.LastIndexByte(p, '/')+1:]
+		if f.outFile == "" {
+			return nil, &curlError{code: exitWriteError, err: errors.New("Remote file name has no length"), quiet: f.quiet()} //nolint:staticcheck // ST1005: curl's message.
+		}
+	case f.output != "-":
+		f.outFile = f.output
+	}
+
+	// As curl does, Accept: */* and its own User-Agent; -A, -e, -r and -H
 	// replace them, -H last.
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("User-Agent", "kuzl/"+version)
@@ -239,6 +325,9 @@ func (f *curlFlags) newRequest(c *cobra.Command, rawURL string) (*http.Request, 
 	}
 	if f.referer != nil {
 		req.Header.Set("Referer", *f.referer)
+	}
+	if f.rangeSpec != "" {
+		req.Header.Set("Range", "bytes="+f.rangeSpec)
 	}
 	set := map[string]bool{}
 	for _, h := range f.headers {
@@ -306,13 +395,88 @@ func validHeaderName(s string) bool {
 	return true
 }
 
+// parseSize parses a --max-filesize value as curl does: a number of bytes,
+// with k, M or G for 1024, 1024² or 1024³ of them.
+func parseSize(s string) (int64, bool) {
+	if s == "" {
+		return 0, false
+	}
+	mult := int64(1)
+	switch s[len(s)-1] {
+	case 'k', 'K':
+		mult = 1 << 10
+	case 'm', 'M':
+		mult = 1 << 20
+	case 'g', 'G':
+		mult = 1 << 30
+	}
+	if mult > 1 {
+		s = s[:len(s)-1]
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n < 0 || n > math.MaxInt64/mult {
+		return 0, false
+	}
+	return n * mult, true
+}
+
+// expandWriteOut expands an -w format as curl does: %{name} is a variable from
+// vars, %% is %, and \n, \r, \t and \\ are escapes. A variable kuzl doesn't
+// know is an error, so newRequest checks the format with nil vars.
+func expandWriteOut(format string, vars map[string]string) (string, error) {
+	var b strings.Builder
+	for i := 0; i < len(format); i++ {
+		c := format[i]
+		switch {
+		case strings.HasPrefix(format[i:], "%%"):
+			b.WriteByte('%')
+			i++
+		case strings.HasPrefix(format[i:], "%{"):
+			end := strings.IndexByte(format[i:], '}')
+			if end < 0 {
+				return "", errors.New(`"%{" without a closing "}"`)
+			}
+			name := format[i+2 : i+end]
+			if !slices.Contains(writeOutNames, name) {
+				return "", fmt.Errorf("unknown variable %%{%s}: kuzl knows %%{%s}", name, strings.Join(writeOutNames, "}, %{"))
+			}
+			b.WriteString(vars[name])
+			i += end
+		case c == '\\' && i+1 < len(format) && strings.IndexByte(`nrt\`, format[i+1]) >= 0:
+			b.WriteByte(map[byte]byte{'n': '\n', 'r': '\r', 't': '\t', '\\': '\\'}[format[i+1]])
+			i++
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String(), nil
+}
+
+// writeOutVars are the -w variables for a transfer: resp is nil if there was
+// no response, and size is how many bytes of body came.
+func writeOutVars(req *http.Request, resp *http.Response, size int64) map[string]string {
+	vars := map[string]string{
+		"http_code":     "000",
+		"content_type":  "",
+		"url_effective": req.URL.String(),
+		"size_download": strconv.FormatInt(size, 10),
+	}
+	if resp != nil {
+		vars["http_code"] = fmt.Sprintf("%03d", resp.StatusCode)
+		vars["content_type"] = resp.Header.Get("Content-Type")
+		vars["url_effective"] = resp.Request.URL.String()
+	}
+	return vars
+}
+
 func (f *curlFlags) quiet() bool { return f.silent && !f.showError }
 
 func seconds(s float64) time.Duration { return time.Duration(s * float64(time.Second)) }
 
 // fetch sends req and writes the response: the headers of every hop with -i
-// or -I, then the body, capped at maxShowBytes.
-func (f *curlFlags) fetch(ctx context.Context, s IO, req *http.Request, rec *record) error {
+// or -I, then the body, to the file in root with -o or -O, or else to stdout,
+// capped at maxShowBytes. -w comes after, on stdout.
+func (f *curlFlags) fetch(ctx context.Context, s IO, req *http.Request, root *workspace.Root, rec *record) error {
 	if f.maxTime > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, seconds(f.maxTime))
@@ -332,11 +496,22 @@ func (f *curlFlags) fetch(ctx context.Context, s IO, req *http.Request, rec *rec
 	start := time.Now()
 	resp, err := client.Do(req.WithContext(ctx))
 	if err != nil {
-		return f.transferError(err, time.Since(start))
+		err = f.transferError(err, time.Since(start))
+		if _, ok := errors.AsType[*refusalError](err); ok {
+			return err
+		}
+		return f.writeOutAfter(s, req, nil, 0, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	rec.add("status", resp.StatusCode)
+	size, err := f.writeResponse(s, req, resp, hops.hops, root, start, rec)
+	return f.writeOutAfter(s, req, resp, size, err)
+}
 
+// writeResponse writes resp, with the headers of hops before it with -i or
+// -I, to the file in root, or to stdout if root is nil. It returns how many
+// bytes of body came.
+func (f *curlFlags) writeResponse(s IO, req *http.Request, resp *http.Response, hops []*http.Response, root *workspace.Root, start time.Time, rec *record) (int64, error) {
 	failed := resp.StatusCode >= 400 && (f.fail || f.failWithBody)
 	httpErr := &curlError{
 		code:  exitHTTPReturned,
@@ -344,74 +519,170 @@ func (f *curlFlags) fetch(ctx context.Context, s IO, req *http.Request, rec *rec
 		quiet: f.quiet(),
 	}
 	if failed && f.fail {
-		return httpErr
+		return 0, httpErr
+	}
+	// As curl does, a body that says it is too big isn't read at all.
+	limit := f.maxBytes
+	if limit == 0 && root != nil {
+		limit = maxDownloadBytes
+	}
+	if limit > 0 && resp.ContentLength > limit && req.Method != http.MethodHead {
+		return 0, f.fileSizeError()
 	}
 
 	var head []byte
 	if f.head || f.include {
 		var b bytes.Buffer
-		for _, h := range hops.hops {
+		for _, h := range hops {
 			writeHeaders(&b, h)
 		}
 		head = b.Bytes()
 	}
+	if root != nil {
+		n, err := f.save(root, req, resp, head, limit, start, rec)
+		if err == nil && failed {
+			err = httpErr
+		}
+		return n, err
+	}
+
 	var body []byte
 	var bodyErr error
+	var size int64
 	more, moreExact := int64(0), true
 	if req.Method != http.MethodHead {
-		limit := max(maxShowBytes+1-len(head), 0)
-		body, bodyErr = io.ReadAll(io.LimitReader(resp.Body, int64(limit)))
-		if bodyErr == nil && len(body) == limit {
-			more, moreExact, bodyErr = countRest(resp, int64(len(body)))
+		show := max(maxShowBytes+1-len(head), 0)
+		body, bodyErr = io.ReadAll(io.LimitReader(resp.Body, int64(show)))
+		if bodyErr == nil && len(body) == show && (f.maxBytes == 0 || int64(show) <= f.maxBytes) {
+			rest := int64(maxCountBytes)
+			if f.maxBytes > 0 {
+				rest = f.maxBytes - int64(show)
+			}
+			more, moreExact, bodyErr = countRest(resp, int64(show), rest)
 		}
-		rec.add("bytes", int64(len(body))+more)
+		size = int64(len(body)) + more
+		rec.add("bytes", size)
+		// Nothing is written of a body over --max-filesize.
+		if f.maxBytes > 0 && (size > f.maxBytes || !moreExact) {
+			return size, f.fileSizeError()
+		}
 	}
 
 	data := append(head, body...)
 	n := capAt(data, maxShowBytes)
 	if shown := data[min(len(head), n):n]; bytes.IndexByte(shown, 0) >= 0 || !utf8.Valid(shown) {
 		if _, err := s.Out.Write(data[:min(len(head), n)]); err != nil {
-			return f.writeError(err)
+			return size, f.writeError(err)
 		}
 		// The failed request matters more to the caller than the binary body.
 		if failed {
-			return httpErr
+			return size, httpErr
 		}
 		what := "binary output"
 		if ct := resp.Header.Get("Content-Type"); ct != "" {
 			what += " (Content-Type " + ct + ")"
 		}
-		return &curlError{code: exitWriteError, err: fmt.Errorf("%s is not written to stdout", what)}
+		return size, &curlError{code: exitWriteError, err: fmt.Errorf("%s is not written to stdout; use -o to save it", what)}
 	}
 	if _, err := s.Out.Write(data[:n]); err != nil {
-		return f.writeError(err)
+		return size, f.writeError(err)
 	}
 	if left := int64(len(data)-n) + more; left > 0 {
 		if moreExact {
-			_, _ = fmt.Fprintf(s.ErrOut, "… truncated, %d more bytes\n", left)
+			_, _ = fmt.Fprintf(s.ErrOut, "… truncated, %d more bytes; use -o to save it all\n", left)
 		} else {
-			_, _ = fmt.Fprintf(s.ErrOut, "… truncated, more than %d more bytes\n", left)
+			_, _ = fmt.Fprintf(s.ErrOut, "… truncated, more than %d more bytes; use -o to save it all\n", left)
 		}
 	}
 	if bodyErr != nil {
-		return f.transferError(bodyErr, time.Since(start))
+		return size, f.transferError(bodyErr, time.Since(start))
 	}
 	if failed {
-		return httpErr
+		return size, httpErr
 	}
-	return nil
+	return size, nil
+}
+
+// save writes head and resp's body to the -o file in root, at most limit
+// bytes of body. A body over limit fails with exit 63, leaving the part
+// written, as curl does.
+func (f *curlFlags) save(root *workspace.Root, req *http.Request, resp *http.Response, head []byte, limit int64, start time.Time, rec *record) (int64, error) {
+	file, err := root.Create(f.outFile)
+	if err != nil {
+		return 0, &curlError{code: exitWriteError, err: fmt.Errorf("Failed to open the file %w", err), quiet: f.quiet()} //nolint:staticcheck // ST1005: curl's message.
+	}
+	w := &errWriter{w: file}
+	_, _ = w.Write(head)
+	var n int64
+	var bodyErr error
+	tooBig := false
+	if req.Method != http.MethodHead {
+		n, bodyErr = io.Copy(w, io.LimitReader(resp.Body, limit))
+		if bodyErr == nil && n == limit {
+			var one [1]byte
+			k, _ := io.ReadFull(resp.Body, one[:])
+			tooBig = k > 0
+		}
+		rec.add("bytes", n)
+	}
+	closeErr := file.Close()
+	switch {
+	case w.err != nil:
+		return n, f.writeError(w.err)
+	case tooBig:
+		return n, f.fileSizeError()
+	case bodyErr != nil:
+		return n, f.transferError(bodyErr, time.Since(start))
+	case closeErr != nil:
+		return n, f.writeError(closeErr)
+	}
+	return n, nil
+}
+
+// errWriter keeps the first error its writer returns, so that a failed write
+// to the file can be told from a failed read of the body in io.Copy.
+type errWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (e *errWriter) Write(p []byte) (int, error) {
+	if e.err != nil {
+		return 0, e.err
+	}
+	n, err := e.w.Write(p)
+	e.err = err
+	return n, err
+}
+
+// writeOutAfter writes -w, if set, to stdout once the transfer is over,
+// failed or not, as curl does, and returns err, the transfer's.
+func (f *curlFlags) writeOutAfter(s IO, req *http.Request, resp *http.Response, size int64, err error) error {
+	if f.writeOut == "" {
+		return err
+	}
+	// newRequest has checked the format.
+	out, _ := expandWriteOut(f.writeOut, writeOutVars(req, resp, size))
+	if _, werr := io.WriteString(s.Out, out); werr != nil && err == nil {
+		return f.writeError(werr)
+	}
+	return err
+}
+
+func (f *curlFlags) fileSizeError() error {
+	return &curlError{code: exitFileSizeExceeded, err: errors.New("Maximum file size exceeded"), quiet: f.quiet()} //nolint:staticcheck // ST1005: curl's message.
 }
 
 // countRest returns how many bytes of resp's body are left after the first
 // read ones. Its Content-Length says so without reading them, unless Go's
-// client decompressed the body; otherwise the rest is read, up to
-// maxCountBytes, and exact is false if there was more.
-func countRest(resp *http.Response, read int64) (n int64, exact bool, err error) {
+// client decompressed the body; otherwise the rest is read, up to limit
+// bytes, and exact is false if there was more.
+func countRest(resp *http.Response, read, limit int64) (n int64, exact bool, err error) {
 	if resp.ContentLength >= read && !resp.Uncompressed {
 		return resp.ContentLength - read, true, nil
 	}
-	n, err = io.Copy(io.Discard, io.LimitReader(resp.Body, maxCountBytes+1))
-	return min(n, maxCountBytes), n <= maxCountBytes, err
+	n, err = io.Copy(io.Discard, io.LimitReader(resp.Body, limit+1))
+	return min(n, limit), n <= limit, err
 }
 
 // capAt returns how much of data to show: all of it, or up to limit bytes, cut
@@ -460,11 +731,8 @@ func (r *hopRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, err
 }
 
-// transferError maps a failed request to curl's exit code and message. A
-// request the policy refuses is a refusalError instead, which -s doesn't
-// silence.
-// writeError is curl's exit 23 for stdout that can't be written, such as a
-// closed pipe.
+// writeError is curl's exit 23 for output that can't be written, such as
+// stdout on a closed pipe or a full disk under -o.
 func (f *curlFlags) writeError(err error) error {
 	return &curlError{
 		code:  exitWriteError,
@@ -473,6 +741,9 @@ func (f *curlFlags) writeError(err error) error {
 	}
 }
 
+// transferError maps a failed request to curl's exit code and message. A
+// request the policy refuses is a refusalError instead, which -s doesn't
+// silence.
 func (f *curlFlags) transferError(err error, elapsed time.Duration) error {
 	if re, ok := errors.AsType[*netguard.RefusedError](err); ok {
 		return &refusalError{err: re}
