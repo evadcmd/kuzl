@@ -3,3 +3,5 @@
 bin
 dist
 build
+**/.env
+**/.env.*
