@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -115,7 +116,61 @@ func TestSymlinkedRootTakesBothSpellings(t *testing.T) {
 		}
 		wantFile(t, filepath.Join(dir, "sub", "out.txt"), name)
 	}
-	wantErr(t, r.WriteFile(filepath.Join(base, "other.md"), []byte("x")), "outside "+link)
+	wantErr(t, r.WriteFile(filepath.Join(base, "other.md"), []byte("x")), "outside "+dir)
+}
+
+// The directory opened is the one dir named when Open was called, even if
+// its path is swapped for a symlink right after it is resolved.
+func TestOpenDoesNotReopenTheResolvedPath(t *testing.T) {
+	_, base, dir, secret := setup(t)
+	elsewhere := filepath.Dir(secret)
+	moved := filepath.Join(base, "moved")
+	t.Cleanup(func() { evalSymlinks = filepath.EvalSymlinks })
+	evalSymlinks = func(path string) (string, error) {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err == nil {
+			err = os.Rename(dir, moved)
+		}
+		if err == nil {
+			err = os.Symlink(elsewhere, dir)
+		}
+		return resolved, err
+	}
+	r, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+
+	if err := r.WriteFile("out.txt", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	wantFile(t, filepath.Join(moved, "out.txt"), "x")
+	if _, err := os.Lstat(filepath.Join(elsewhere, "out.txt")); err == nil {
+		t.Error("a file was written through the swapped path")
+	}
+}
+
+// A caller can pin the root with a directory fd; absolute names are then
+// spelled with the directory's path, and messages name it too.
+func TestFdRoot(t *testing.T) {
+	_, base, dir, _ := setup(t)
+	f, err := os.Open(dir) //nolint:gosec // G304: a path under the test temp dir.
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	r, err := Open(fmt.Sprintf("/proc/self/fd/%d", f.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+
+	if err := r.WriteFile(filepath.Join(dir, "out.txt"), []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	wantFile(t, filepath.Join(dir, "out.txt"), "x")
+	wantErr(t, r.WriteFile(filepath.Join(base, "other.md"), []byte("x")), "outside "+dir)
 }
 
 func TestCheck(t *testing.T) {
