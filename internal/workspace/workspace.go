@@ -56,11 +56,12 @@ func FromEnv(getenv func(string) string) (*Root, error) {
 // swapped for a symlink before it is opened.
 //
 // The resolved path only matches absolute names (rel) and names the root in
-// messages. For /proc/self/fd/N it is the path of the directory opened
-// (resolve). Otherwise, or if the directory moves later, it may name another
-// directory: absolute names under it are then mapped to the same relative
-// path in the directory opened, and those under the directory's own path are
-// refused, but nothing outside the directory opened is reached.
+// messages. For a dir that cleans to /proc/self/fd/N it is the path of the
+// directory opened (resolve). For any other spelling, /dev/fd/N included, or
+// if the directory moves later, it may name another directory: absolute names
+// under it are then mapped to the same relative path in the directory opened,
+// and those under the directory's own path are refused, but nothing outside
+// the directory opened is reached.
 func Open(dir string) (*Root, error) {
 	if !filepath.IsAbs(dir) {
 		return nil, fmt.Errorf("root %q is not an absolute path", dir)
