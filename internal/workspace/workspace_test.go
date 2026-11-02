@@ -9,10 +9,15 @@ import (
 )
 
 // setup makes base/user as a root with a file in it, and a secret file next
-// to base, outside the root.
+// to base, outside the root. The paths have no symlinks in them, so dir is
+// also the root's resolved path, which absolute names and messages use.
 func setup(t *testing.T) (r *Root, base, dir, secret string) {
 	t.Helper()
-	tmp := t.TempDir()
+	// The temp dir may be under a symlink (/var -> /private/var on macOS).
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	base = filepath.Join(tmp, "workspace")
 	dir = filepath.Join(base, "user")
 	secret = filepath.Join(tmp, "secret.pem")
@@ -27,7 +32,7 @@ func setup(t *testing.T) (r *Root, base, dir, secret string) {
 			t.Fatal(err)
 		}
 	}
-	r, err := Open(dir)
+	r, err = Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,6 +159,9 @@ func TestOpenDoesNotReopenTheResolvedPath(t *testing.T) {
 // A caller can pin the root with a directory fd; absolute names are then
 // spelled with the directory's path, and messages name it too.
 func TestFdRoot(t *testing.T) {
+	if _, err := os.Stat("/proc/self/fd"); err != nil {
+		t.Skip("no /proc/self/fd")
+	}
 	_, base, dir, _ := setup(t)
 	f, err := os.Open(dir) //nolint:gosec // G304: a path under the test temp dir.
 	if err != nil {
