@@ -53,9 +53,14 @@ func FromEnv(getenv func(string) string) (*Root, error) {
 //
 // dir itself is opened, not its resolved path: a caller can pin the root
 // with /proc/self/fd/N, and resolving that gives back a path that may be
-// swapped for a symlink before it is opened. The resolved path only matches
-// absolute names (rel), so if it is stale, those are refused, but nothing
-// is reached outside the directory opened.
+// swapped for a symlink before it is opened.
+//
+// The resolved path only matches absolute names (rel) and names the root in
+// messages. For /proc/self/fd/N it is the path of the directory opened
+// (resolve). Otherwise, or if the directory moves later, it may name another
+// directory: absolute names under it are then mapped to the same relative
+// path in the directory opened, and those under the directory's own path are
+// refused, but nothing outside the directory opened is reached.
 func Open(dir string) (*Root, error) {
 	if !filepath.IsAbs(dir) {
 		return nil, fmt.Errorf("root %q is not an absolute path", dir)
@@ -64,12 +69,24 @@ func Open(dir string) (*Root, error) {
 	if err != nil {
 		return nil, err
 	}
-	realDir, err := evalSymlinks(dir)
+	realDir, err := resolve(dir)
 	if err != nil {
 		_ = root.Close()
 		return nil, err
 	}
 	return &Root{dir: filepath.Clean(dir), realDir: realDir, root: root}, nil
+}
+
+// resolve returns dir with its symlinks resolved. A /proc/self/fd/N is only
+// read with Readlink: the kernel gives the path of the directory the fd has
+// open, while EvalSymlinks would go on to walk that path, which may have been
+// swapped for a symlink by then.
+func resolve(dir string) (string, error) {
+	// Cleaned, as a trailing slash would make Readlink follow the link.
+	if dir = filepath.Clean(dir); filepath.Dir(dir) == "/proc/self/fd" {
+		return os.Readlink(dir)
+	}
+	return evalSymlinks(dir)
 }
 
 // Close releases the root's directory handle.

@@ -168,7 +168,15 @@ func TestFdRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = f.Close() }()
-	r, err := Open(fmt.Sprintf("/proc/self/fd/%d", f.Fd()))
+	// The fd's path is taken from the kernel, not walked again, where it
+	// could be swapped for a symlink.
+	t.Cleanup(func() { evalSymlinks = filepath.EvalSymlinks })
+	evalSymlinks = func(path string) (string, error) {
+		t.Errorf("evalSymlinks(%q) for an fd root", path)
+		return filepath.EvalSymlinks(path)
+	}
+	// The trailing slash has to be cleaned off before Readlink.
+	r, err := Open(fmt.Sprintf("/proc/self/fd/%d/", f.Fd()))
 	if err != nil {
 		t.Fatal(err)
 	}
